@@ -1,0 +1,350 @@
+---
+title: SIMCAST-Spatial — Project Overview
+author: 
+ - name: Piero Palacios
+   email: piero.palacios@cgiar.org
+   affiliation: 
+    - name: International Potato Center
+ - name: Henry Juarez
+   email: H.JUAREZ@CGIAR.ORG
+   affiliation: 
+    - name: International Potato Center
+format: 
+  docx: default
+  pdf: default
+  html:
+    embed-resources: true
+---
+
+
+# SIMCAST-Spatial — Project Overview (for non-coders)
+
+## What is it?
+
+**SIMCAST-Spatial** is a scientific data-processing pipeline that turns climate data (temperature, humidity proxy, rainfall) into **spatial decision-support outputs** related to **potato late blight** risk and **fungicide application timing**.
+
+It does this by:
+- Converting gridded climate datasets into values at many target locations (a point grid).
+- Reconstructing **hourly** temperature and relative humidity conditions from daily climate variables.
+- Running the **SIMCAST** disease-risk model at each location and time period.
+- Producing tabular summaries and map-ready raster outputs (GeoTIFFs), plus optional animations.
+
+Even though it is implemented in Python, you can think of it as a “workflow” that:
+1) prepares climate inputs, 2) computes disease pressure metrics, and 3) writes outputs you can map and interpret.
+
+---
+
+## What is it for?
+
+This project is designed to support **agroclimatic zoning and risk mapping** for potato late blight by answering questions like:
+
+- Where (spatially) and when (seasonally) do weather conditions favor late blight development?
+- How many fungicide applications would be expected under SIMCAST rules?
+- Where are trends increasing/decreasing over the years?
+
+Typical use cases:
+- **Regional risk mapping** for agricultural planning.
+- **Comparing seasons or regions** (e.g., wet vs dry seasons, highlands vs lowlands).
+- **Monitoring interannual variability** and **trend detection** over multiple years.
+
+---
+
+## What inputs does it need (conceptually)?
+
+You provide two main types of inputs:
+
+### 1) A spatial grid of locations
+A file containing many geographic features (usually points), each with an identifier (`ID`). Each point represents a location where the model is evaluated.
+
+### 2) Climate time series on a grid (NetCDF)
+Monthly files with daily values for:
+- Daily minimum temperature (**TMIN**)
+- Daily maximum temperature (**TMAX**)
+- Daily dew point temperature (**TDEW**) — used to estimate humidity
+- Daily precipitation (**PP**)
+
+These are standard climate variables often available from reanalysis products, downscaled climate grids, or climate services.
+
+---
+
+## The science and math behind the pipeline (plain language)
+
+### Step A — Align climate data to a common grid (resampling)
+Climate datasets often come on different grids/resolutions. Before you can compare or combine them at the same location, they must be aligned.
+
+**Resampling** means interpolating/transforming one gridded dataset so its pixels match a target grid:
+- Same pixel size (resolution)
+- Same pixel alignment
+- Same geographic coverage/projection (as needed)
+
+In this pipeline, resampling is especially used to ensure precipitation matches the grid used for the temperature products.
+
+**Why this matters:** if variables are misaligned, you could combine a temperature value from one pixel with rainfall from a different pixel—introducing spatial errors.
+
+---
+
+### Step B — Extract climate values at each location (masking)
+Once rasters are aligned, the pipeline “samples” the climate grids at each location in your point grid.
+
+The result is a time series per location:
+- For each day: TMIN, TMAX, TDEW, and PP
+
+These extracted values are stored efficiently in columnar tables (Parquet files) for fast reading later.
+
+---
+
+### Step C — Reconstruct hourly conditions from daily climate data
+SIMCAST relies on **hours of high relative humidity**, but many climate datasets are daily.
+
+To bridge that gap, the pipeline reconstructs an **hourly** temperature and humidity profile using two standard components:
+1) a **diurnal temperature curve model** (García‑1), and  
+2) a **humidity-from-dew-point formulation** (Buck equation for vapor pressure).
+
+#### 1) A diurnal (day–night) temperature curve (García‑1)
+Given daily **TMIN** and **TMAX**, the pipeline approximates the 24-hour temperature pattern across the day using a smooth, piecewise curve that depends on:
+- Sunrise time $H_n$ and sunset time $H_o$ (computed from latitude/longitude and date)
+- Daily temperature extrema $T_{\min}$, $T_{\max}$
+- The next day’s minimum temperature (to shape the overnight cooling)
+
+Output: an estimated **hourly temperature** series $T(h)$ for $h = 1, 2, \dots, 24$.
+
+#### 2) Relative humidity from temperature + dew point (Buck equation)
+Dew point is a strong indicator of atmospheric moisture. The pipeline computes:
+- Saturation vapor pressure at air temperature
+- Actual vapor pressure at dew point
+- Relative humidity as a ratio of the two
+
+This is standard meteorological math used in many models.
+
+Output: an estimated **hourly relative humidity** series $RH(h)$ for $h = 1, 2, \dots, 24$.
+
+#### 3) Hours of high humidity (HHR)
+For each day, the model counts how many hours exceed a humidity threshold (default **90% RH**). This is often called **Hours of High Relative Humidity**.
+
+Important detail: the project uses a 24-hour “observation window” from **13:00 today to 12:00 next day** (a convention inherited from the original workflow). This matters because humidity often peaks overnight; the window captures that pattern in a consistent way.
+
+#### Step C — model details (math)
+This subsection names the models explicitly and shows the equations used in the pipeline.
+
+**C.1 García‑1 diurnal temperature reconstruction (conceptual)**  
+The goal is to reconstruct hourly temperature $T(h)$ from daily values $T_{\min}, T_{\max}$ and solar timing $H_n$ (sunrise), $H_o$ (sunset). García‑1 is implemented as a **piecewise** curve that smoothly models:
+- daytime warming after sunrise,
+- a late-afternoon transition,
+- nighttime cooling after sunset toward the next minimum.
+
+(For non-coders: the key point is that the project does **not** assume temperature is constant within a day; it builds a realistic hourly cycle.)
+
+**C.2 Buck equation (vapor pressure) and relative humidity**  
+Let $T(h)$ be the reconstructed hourly air temperature (°C), and let $T_{dew}$ be dew point temperature (°C). Using the Buck-type saturation vapor pressure formulation (in kPa):
+
+$$
+e_s(T) = 0.61121 \cdot \exp\left(\left(18.678 - \frac{T}{234.5}\right)\cdot \frac{T}{257.14 + T}\right)
+$$
+
+Actual vapor pressure is computed from dew point:
+
+$$
+e(T_{dew}) = 0.61121 \cdot \exp\left(\left(18.678 - \frac{T_{dew}}{234.5}\right)\cdot \frac{T_{dew}}{257.14 + T_{dew}}\right)
+$$
+
+Relative humidity per hour is then:
+
+$$
+RH(h) = 100 \cdot \frac{e(T_{dew})}{e_s(T(h))}
+$$
+
+**C.3 Hours of High Relative Humidity (HHR)**  
+Given a threshold $RH_{thr}$ (default $90\%$), the daily HHR metric is:
+
+$$
+HHR = \sum_{h=1}^{24} \mathbb{1}\left[ RH(h) \ge RH_{thr} \right]
+$$
+
+This $HHR$ (and the temperature during those high-humidity hours) is what feeds the SIMCAST blight-risk scoring.
+
+---
+
+### Step D — Compute disease pressure and spray triggers (SIMCAST core)
+SIMCAST is a rule-based model that turns weather conditions into:
+
+#### BU (Blight Units)
+A daily score based on:
+- **How many hours** humidity is high (HHR)
+- The **temperature during those humid hours**
+
+Higher BU means weather is more favorable for late blight development.
+
+#### FU (Fungicide Units)
+A daily score representing how fast fungicide protection is “used up” or needs renewal, driven mainly by:
+- **Rainfall amount**
+- **Days since last application**
+
+More rain and more time since spraying generally increase FU.
+
+#### ABU and AFU (Accumulated BU/FU)
+The model accumulates BU and FU day after day until a threshold is reached.
+
+#### APP (Application count)
+When thresholds indicate a spray should occur, the model increments the application counter and resets accumulations according to the SIMCAST decision rules.
+
+##### Variety resistance matters
+The model supports multiple “variety types” (susceptibility/resistance classes). More susceptible varieties reach thresholds sooner, typically resulting in more applications under the same weather.
+
+---
+
+### Step E — Trend analysis (optional): “Is risk increasing over years?”
+If you run multiple years, the pipeline can fit a **linear trend** at each location:
+
+It models (for each point):
+- `APP ~ year`  (trend in maximum number of applications)
+- `ABU ~ year`  (trend in total blight pressure)
+- `AFU ~ year`  (trend in total fungicide pressure)
+
+This is done using **ordinary least squares (OLS) regression**, producing:
+- **Slope** (increase/decrease per year)
+- **p-value** (statistical significance)
+- **R²** (how well the linear trend explains variation)
+
+The pipeline can then map:
+- Significant increase
+- Significant decrease
+- Not significant
+
+---
+
+## What is the expected result if you use this?
+
+If you run the full workflow correctly, you should expect:
+
+1) **Clean, aligned climate inputs** on a consistent grid.
+2) **Extracted time series** at each location (fast to re-use).
+3) **Per-location SIMCAST outputs** describing:
+   - Daily disease-favorable conditions (BU)
+   - Daily fungicide pressure (FU)
+   - Accumulated values (ABU/AFU)
+   - Expected spray/application count (APP)
+4) **Map-ready outputs** (GeoTIFF rasters) that you can visualize in GIS software.
+5) Optionally, **trend maps** showing where risk metrics are increasing/decreasing over time.
+6) Optionally, an **animation** summarizing patterns across “all lands” for communication.
+
+Interpretation-wise:
+- Areas with higher APP typically represent **higher management pressure** (more sprays expected).
+- Areas with higher BU/ABU represent **more favorable disease conditions** (weather-driven risk).
+- FU/AFU indicate **how quickly protection may need renewal**, influenced by rainfall and time since spraying.
+
+---
+
+## What are the outputs?
+
+This project produces outputs at multiple stages. You may not need all of them depending on your goal.
+
+### 1) Resampled climate files (NetCDF)
+**Purpose:** aligned precipitation data on the target grid.
+
+**Typical filename pattern:**
+- `prec_daily_YYYY_MM.nc`
+
+**What it contains:** daily precipitation values on the chosen grid, for that month.
+
+---
+
+### 2) Extracted climate tables (Parquet)
+**Purpose:** fast per-location climate time series used by SIMCAST.
+
+**Expected directory pattern:**
+- `<PARQUET_BASE_DIR>/<variable>/Outputs/<variable>_daily_YYYY_MM.parquet`
+
+**Typical variables:** precipitation, tmin, tmax, dew point.
+
+**Core columns (conceptually):**
+- `ID` (location identifier)
+- `FECHA` (date)
+- `Value` (the climate value for that variable)
+
+---
+
+### 3) SIMCAST results tables (Parquet)
+**Purpose:** the main model outputs in table form (easy to aggregate, chart, and join to geometry).
+
+**Typical output:**
+- `simcast_results.parquet` per year/crop/region grouping (depending on how runs are configured)
+
+**What it contains (conceptually):**
+For each location and day in the run period, values such as:
+- `hr_ge_thresh`: hours with RH ≥ threshold (e.g., 90%)
+- `tmean_ge_thresh`: mean temperature during those high-humidity hours
+- `rain_mm`: rainfall
+- `tavg_C`: daily average temperature
+- `BU`, `FU`: daily scores
+- `ABU`, `AFU`: accumulated scores at application decision points
+- `APP`: cumulative application count through the season
+
+This is the most information-rich output and is the best source for further custom reporting.
+
+---
+
+### 4) Raster (map) outputs (GeoTIFF)
+**Purpose:** GIS-ready surfaces to visualize patterns spatially.
+
+Depending on which steps you run, typical GeoTIFFs include:
+
+- **APP rasters** (application intensity / count)
+  - Example pattern: `simcast_<year>_<period>_<region>.tif`
+
+- **BU and FU summary rasters** (summed over season)
+  - `BU_sum_<year>_<period>_<region>.tif`
+  - `FU_sum_<year>_<period>_<region>.tif`
+
+These rasters let you:
+- Make choropleth-style maps
+- Clip to administrative boundaries
+- Compare years/seasons visually
+
+---
+
+### 5) Trend statistics (Parquet) and trend maps (PNG)
+**Purpose:** quantify and visualize long-term changes over multiple years.
+
+Typical outputs:
+- A table of trend stats per location (e.g., slope/p-value/R² for APP/ABU/AFU)
+- PNG maps showing:
+  - significant increase/decrease/not-significant
+  - coefficient (slope magnitude) for significant points
+
+---
+
+### 6) Animation outputs (visual summary)
+**Purpose:** communication product for stakeholders, showing changes across space over time.
+
+The pipeline can assemble yearly/seasonal rasters into an “all lands” animation.
+
+---
+
+## How should a non-coder user read the results?
+
+A practical guide:
+
+- If you want a **single seasonal risk map**, use the **GeoTIFF outputs** (APP, BU_sum, FU_sum).
+- If you want **numbers per location** (for tables, dashboards, reports), use the **Parquet outputs**.
+- If you want to answer “Is risk increasing?”, use the **trend outputs** (trend parquet + PNG maps).
+
+A good validation approach (recommended):
+- Pick a few locations and plot their daily outputs (BU/FU/APP) to check the seasonality looks plausible.
+- Compare spatial patterns against known agroecological gradients (elevation, wet/dry zones).
+- If available, compare with historical disease observations or spray records.
+
+---
+
+## Summary (answers to your required questions)
+
+### What is it?
+A spatial SIMCAST pipeline that converts gridded climate data into late blight risk and fungicide-application indicators across many locations.
+
+### What is it for?
+To support potato late blight risk mapping, agroclimatic zoning, seasonal decision support, and multi-year trend analysis.
+
+### What is the expected result if you use this?
+You will obtain per-location and map-ready outputs (tables + rasters) describing humidity-driven disease favorability (BU/ABU) and expected application pressure (APP), optionally with trend statistics over years.
+
+### What are the outputs?
+NetCDF resampled precipitation, Parquet climate extracts, Parquet SIMCAST results, GeoTIFF rasters (APP/BU/FU summaries), optional trend Parquet + PNG maps, and optional animations.
