@@ -1,0 +1,100 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+*.pyd
+*.so
+*.dylib
+*.dll
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.pytype/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.log
+
+# Packaging / build
+build/
+dist/
+wheels/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.conda/
+*.conda
+
+# Jupyter / notebooks
+.ipynb_checkpoints/
+.notebook/
+
+# IDE / editor
+.vscode/
+.idea/
+*.iml
+
+# OS junk
+.DS_Store
+.DS_Store?
+Thumbs.db
+
+# Secrets / local config
+.env
+.env.*
+*.pem
+*.key
+
+# Data / outputs (spatial + large artifacts)
+results/
+output/
+outputs/
+data/
+datasets/
+cache/
+tmp/
+temp/
+
+# Common spatial / raster / model artifacts
+*.parquet
+*.feather
+*.arrow
+*.zarr
+*.nc
+*.h5
+*.hdf5
+*.tif
+*.tiff
+*.img
+*.vrt
+*.asc
+
+# Vector formats (often large; ignore by default)
+*.gpkg
+*.shp
+*.dbf
+*.shx
+*.prj
+*.cpg
+*.qpj
+*.geojson
+*.json
+*.csv
+*.tsv
+
+# QGIS
+*.qgs
+*.qgz
+
+# Dask artifacts
+dask-worker-space/
+
+# Misc
+.DS_Store
