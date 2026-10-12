@@ -131,12 +131,11 @@ def main():
             potato_grid_file=paths.potato_grid_file,
             output_stats_parquet_path=stats_parquet_path,
             output_yearly_data_path=yearly_parquet_path,
-            year_range=(START_YEAR, END_YEAR),
-            batch_size=500,
+            year_range=(START_YEAR, END_YEAR),  # inclusive
             min_years=10,
-            n_workers=resources.dask_n_workers,
-            threads_per_worker=resources.dask_threads_per_worker,
-            memory_limit=resources.dask_memory_limit,
+            aggregate_by="season",  # "calendar_year" = legacy behaviour
+            exclude_truncated=True,  # drop seasons cut short by missing inputs
+            workers=resources.prepare_workers,
         )
 
     if RUN_TREND_SIGNIFICANCE_MAPS:
@@ -176,6 +175,8 @@ def main():
         generate_bu_fu_rasters(
             results_root=paths.results_root,
             grid_file_path=paths.potato_grid_file,
+            workers=resources.prepare_workers,
+            skip_existing=True,
         )
 
     # ------------------------------------------------------------------
@@ -217,8 +218,8 @@ def main():
 
         save_all_lands_animation(
             anim,
-            gif_path="lateblight_all_lands_bu.gif",
-            mp4_path="lateblight_all_lands_bu.mp4",
+            gif_path=paths.results_root / "lateblight_all_lands_bu.gif",
+            mp4_path=paths.results_root / "lateblight_all_lands_bu.mp4",
             fps=3,
         )
 

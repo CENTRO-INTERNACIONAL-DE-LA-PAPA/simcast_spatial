@@ -209,18 +209,17 @@ It reads all `simcast_results.parquet` under `results_root`, aggregates to **one
 
 Code lives in `trend_significance.py`:
 
-- `compute_trend_stats(...)` writes a stats parquet (e.g. `statistical_trends_all.parquet`) with columns like `slope_app`, `p_value_app`, `r_squared_app` (and the same for `abu`/`afu`).
+- `compute_trend_stats(...)` writes a stats parquet (e.g. `statistical_trends_all.parquet`) with columns like `slope_app`, `p_value_app`, `std_err_app`, `conf_int_lower_app`, `conf_int_upper_app`, `r_squared_app`, `n_years_app` (and the same for `abu`/`afu`), one row per potato-grid ID, plus the yearly table (`yearly_aggregated_data.parquet`: `ID, year, period, region, APP, ABU, AFU, n_days`).
 - `create_significance_map(...)` writes a PNG showing significant increase/decrease/not-significant for a chosen `variable_prefix` (`app`, `abu`, `afu`).
 - `create_coefficient_map(...)` writes a PNG showing slope magnitude for significant points.
 
-Dependencies:
+Changes in the Oct 2026 rewrite (see the module docstring):
 
-- `compute_trend_stats(...)` requires `statsmodels` (for OLS). The plotting functions do not.
-
-Dask notes:
-
-- This also uses Dask Distributed (tasks are batches of IDs). It scatters the file list once to reduce serialization overhead, then streams results back and writes the final parquet(s).
-- Tune `batch_size`, `n_workers`, `threads_per_worker`, and `memory_limit` the same way as the SIMCAST step.
+- Every season file is read **once** and reduced to one row per ID (a process pool over files; the old code re-scanned all files for each batch of 500 IDs). The whole step now takes about a minute.
+- The "year" of a metric is the **season** (the `<year>` folder), not the calendar year of each daily row. `cultivo1` runs Nov–Apr, so the legacy calendar-year aggregation split each season's BU/FU between two years and mixed the end of one season with the start of the next. `aggregate_by="calendar_year"` restores the legacy behaviour.
+- Seasons whose `coverage.json` says `truncated` (e.g. `cultivo1` 2019, cut in Dec 2019 because `prec` stops there) are excluded by default (`exclude_truncated`).
+- The OLS is computed in closed form with NumPy/SciPy for all IDs at once; it matches `statsmodels.OLS` to floating-point precision (`tests/test_trend.py`). `year_range` is inclusive at both ends (the legacy code excluded both endpoints).
+- `statsmodels` is no longer required (only `scipy`); it is in the `dev` group for the equivalence test.
 
 ### Step 4 — BU/FU rasters
 
@@ -228,6 +227,8 @@ Uses `animation_all_lands.generate_bu_fu_rasters(...)` to write:
 
 - `BU_sum_<year>_<period>_<region>.tif`
 - `FU_sum_<year>_<period>_<region>.tif`
+
+Rasters are built with the vectorised grid writer shared with `load_variables.create_raster` (pixel-identical to the previous `iterrows` version, ~2 s instead of ~40 s per raster), in parallel over season files, skipping rasters that already exist.
 
 ### Step 5 — “All lands” animation
 
@@ -238,7 +239,7 @@ Uses:
 - `create_all_lands_animation(...)`
 - `save_all_lands_animation(...)`
 
-Optional: boundary overlay via GADM (`animation_all_lands.load_gadm_peru`). If you can’t access the URL, download the `.gpkg` and point to the local path.
+Optional: boundary overlay via GADM (`animation_all_lands.load_gadm_peru`). A URL is downloaded once to `~/.cache/simcast_spatial/` and reused by every map; if you can’t access the URL, download the `.gpkg` and point to the local path. Years without any BU raster (e.g. 2020, which has no `prec`) are skipped.
 
 ## Resource notes (CPU/RAM)
 
