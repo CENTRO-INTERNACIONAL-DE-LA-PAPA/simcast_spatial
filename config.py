@@ -119,5 +119,5 @@ EXAMPLE_PATHS = PathsConfig(
     potato_grid_file=EXAMPLE_SOURCES.potato_grid_file,
     parquet_base_dir=SIMCAST_INPUTS_DIR,
     results_root=_DATA1 / "results_resistant_v2",
-    gadm_peru_gpkg="https://geodata.ucdavis.edu/gadm/gadm41_PER.gpkg",
+    gadm_peru_gpkg="https://geodata.ucdavis.edu/gadm/gadm4.1/gpkg/gadm41_PER.gpkg",
 )

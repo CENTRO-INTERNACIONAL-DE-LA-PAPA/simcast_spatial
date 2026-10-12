@@ -219,6 +219,7 @@ Changes in the Oct 2026 rewrite (see the module docstring):
 - The "year" of a metric is the **season** (the `<year>` folder), not the calendar year of each daily row. `cultivo1` runs Nov–Apr, so the legacy calendar-year aggregation split each season's BU/FU between two years and mixed the end of one season with the start of the next. `aggregate_by="calendar_year"` restores the legacy behaviour.
 - Seasons whose `coverage.json` says `truncated` (e.g. `cultivo1` 2019, cut in Dec 2019 because `prec` stops there) are excluded by default (`exclude_truncated`).
 - The OLS is computed in closed form with NumPy/SciPy for all IDs at once; it matches `statsmodels.OLS` to floating-point precision (`tests/test_trend.py`). `year_range` is inclusive at both ends (the legacy code excluded both endpoints).
+- A metric that never changes over the years (e.g. `ABU == 0` every season at ~100 k cold Sierra Alta points with the resistant variety) is reported as slope 0 / p-value 1 ("no significant trend") instead of NaN ("no data").
 - `statsmodels` is no longer required (only `scipy`); it is in the `dev` group for the equivalence test.
 
 ### Step 4 — BU/FU rasters

@@ -41,6 +41,14 @@ def test_ols_matches_statsmodels():
         assert r["n_years_app"] == n
 
 
+def test_constant_series_is_no_trend():
+    yearly = pd.DataFrame({"ID": [1] * 20, "year": range(1990, 2010), "ABU": 0.0})
+    out = ols_trend_by_id(yearly, "ABU", min_years=10).set_index("ID")
+    assert out.loc[1, "slope_abu"] == 0.0
+    assert out.loc[1, "p_value_abu"] == 1.0
+    assert np.isnan(out.loc[1, "r_squared_abu"])
+
+
 def test_ols_min_years_and_range():
     yearly = pd.DataFrame(
         {"ID": [1] * 5 + [2] * 20, "year": list(range(2000, 2005)) + list(range(1990, 2010)),

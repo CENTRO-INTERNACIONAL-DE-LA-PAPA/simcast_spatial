@@ -205,7 +205,8 @@ def ols_trend_by_id(
     ``std_err_<m>``, ``conf_int_lower_<m>``, ``conf_int_upper_<m>``,
     ``r_squared_<m>`` and ``n_years_<m>``; IDs with fewer than ``min_years``
     valid years get NaN statistics.  Identical to ``statsmodels.OLS`` with a
-    constant (two-sided t-test, ``(1-alpha)`` CI).
+    constant (two-sided t-test, ``(1-alpha)`` CI), except that a metric that
+    never changes over the years gets slope 0 / p-value 1 (statsmodels: NaN).
     """
     from scipy import stats as sps
 
@@ -241,6 +242,14 @@ def ols_trend_by_id(
         tcrit = sps.t.ppf(1 - alpha / 2, dof)
         lo, hi = slope - tcrit * se, slope + tcrit * se
         r2 = np.where(cyy > 0, 1.0 - sse / cyy, np.nan)
+
+    # A series that is constant over the years (e.g. ABU == 0 every season at
+    # cold high-altitude points) has no trend: report slope 0 and p = 1 so the
+    # maps show it as "not significant" instead of "no data".  (statsmodels
+    # returns p = NaN here because the standard error is 0.)
+    const = (cyy <= 0) & np.isfinite(cyy)
+    slope[const], se[const], lo[const], hi[const] = 0.0, 0.0, 0.0, 0.0
+    p[const] = 1.0
 
     bad = (n < max(min_years, 3)) | ~np.isfinite(cxx) | (cxx <= 0)
     for arr in (slope, p, se, lo, hi, r2):

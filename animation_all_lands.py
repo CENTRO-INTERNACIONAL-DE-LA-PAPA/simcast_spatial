@@ -26,6 +26,26 @@ DEFAULT_CULTIVOS = {
 }
 
 
+def _download(url: str, dest: Path, *, retries: int = 3, timeout: int = 60) -> None:
+    """Download ``url`` to ``dest`` with a browser-like User-Agent and retries."""
+    import time
+
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) simcast-spatial/0.1"}
+    )
+    last: Exception | None = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as fh:
+                while chunk := r.read(1 << 20):
+                    fh.write(chunk)
+            return
+        except Exception as e:  # HTTP 404/5xx or network hiccups
+            last = e
+            time.sleep(2 * (attempt + 1))
+    raise RuntimeError(f"could not download {url}: {last}")
+
+
 def load_gadm_peru(
     gadm_gpkg: str | os.PathLike[str] = DEFAULT_GADM_PERU_GPKG,
     *,
@@ -45,9 +65,15 @@ def load_gadm_peru(
         if not local.exists():
             logger.info("Downloading %s -> %s", src, local)
             tmp = local.with_suffix(".part")
-            urllib.request.urlretrieve(src, tmp)
-            os.replace(tmp, local)
-        src = os.fspath(local)
+            try:
+                _download(src, tmp)
+                os.replace(tmp, local)
+                src = os.fspath(local)
+            except Exception as e:  # fall back to GDAL's own remote reader
+                logger.warning("Download failed (%s); reading %s directly", e, src)
+                tmp.unlink(missing_ok=True)
+        else:
+            src = os.fspath(local)
     gadm_admin1 = gpd.read_file(src, layer="ADM_ADM_1")  # admin-1
     gadm_admin0 = gpd.read_file(src, layer="ADM_ADM_0")  # admin-0
     return gadm_admin0, gadm_admin1
