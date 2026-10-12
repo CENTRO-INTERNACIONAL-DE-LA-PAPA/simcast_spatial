@@ -185,6 +185,39 @@ def build_yearly_table(
     return yearly.sort_values(["ID", "year"], kind="stable").reset_index(drop=True)
 
 
+DEFAULT_POINT_ATTRS = {"Alt": "altitude"}
+
+
+def add_point_attributes(
+    yearly: pd.DataFrame,
+    potato_grid: gpd.GeoDataFrame,
+    *,
+    attrs: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """
+    Add ``lon``, ``lat`` (from the point geometry) and other grid columns to
+    the yearly table.  ``attrs`` maps grid column -> output name
+    (default ``{"Alt": "altitude"}``, metres a.s.l.); missing columns are skipped.
+    """
+    attrs = DEFAULT_POINT_ATTRS if attrs is None else attrs
+    geom = potato_grid.geometry.apply(lambda g: g if g.geom_type == "Point" else g.centroid)
+    pts = pd.DataFrame(
+        {
+            "ID": potato_grid["ID"].to_numpy(),
+            "lon": geom.x.to_numpy(),
+            "lat": geom.y.to_numpy(),
+        }
+    )
+    for col, name in attrs.items():
+        if col in potato_grid.columns:
+            pts[name] = potato_grid[col].to_numpy()
+        else:
+            print(f"[trend] point attribute {col!r} not in the grid file; skipped")
+    out = yearly.merge(pts, on="ID", how="left", validate="many_to_one")
+    lead = ["ID", "lon", "lat", *[n for c, n in attrs.items() if c in potato_grid.columns]]
+    return out[lead + [c for c in out.columns if c not in lead]]
+
+
 # ----------------------------------------------------------------------------
 # Vectorised OLS
 # ----------------------------------------------------------------------------
@@ -286,6 +319,7 @@ def compute_trend_stats(
     aggregate_by: str = "season",
     exclude_truncated: bool = True,
     workers: int = 8,
+    point_attrs: dict[str, str] | None = None,
     # kept for backwards compatibility with main.py; no longer used
     batch_size: int | None = None,
     n_workers: int | None = None,
@@ -299,6 +333,10 @@ def compute_trend_stats(
     yearly table (one row per ID and season), fits ``metric ~ year`` per ID and
     writes the stats parquet (one row per potato-grid ID; IDs without results
     have NaN statistics).  ``year_range`` is inclusive.
+
+    The yearly table written to ``output_yearly_data_path`` carries the point
+    coordinates and attributes (``lon``, ``lat``, ``altitude`` by default; see
+    ``add_point_attributes``).
     """
     if n_workers is not None and workers == 8:
         workers = n_workers
@@ -309,13 +347,17 @@ def compute_trend_stats(
         exclude_truncated=exclude_truncated,
         workers=workers,
     )
-    if output_yearly_data_path is not None:
-        Path(output_yearly_data_path).parent.mkdir(parents=True, exist_ok=True)
-        yearly.to_parquet(output_yearly_data_path, index=False)
 
     potato_grid = gpd.read_file(os.fspath(potato_grid_file))
     if "ID" not in potato_grid.columns:
         potato_grid["ID"] = potato_grid.index
+
+    if output_yearly_data_path is not None:
+        yearly_out = add_point_attributes(yearly, potato_grid, attrs=point_attrs)
+        Path(output_yearly_data_path).parent.mkdir(parents=True, exist_ok=True)
+        yearly_out.to_parquet(output_yearly_data_path, index=False)
+        del yearly_out
+
     stats_df = pd.DataFrame({"ID": potato_grid["ID"].to_numpy()})
 
     for metric in METRICS:

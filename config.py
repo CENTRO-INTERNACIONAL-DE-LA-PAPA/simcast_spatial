@@ -84,13 +84,21 @@ class SimcastConfig:
 
 
 _DATA1 = Path("/media/ppalacios/Data1/henry_simcast_peru")
+_POTATO_GRID = _DATA1 / "PotatoZonning/CENAGRO_OnlyPotatoes_Pisco_Altitude.shp"
 
-# Canonical SIMCAST inputs built by `prepare_inputs.prepare_all` (2026 rerun).
-SIMCAST_INPUTS_DIR = _DATA1 / "simcast_inputs_v2"
+# ----------------------------------------------------------------------------
+# Input trees built by `prepare_inputs.prepare_all`
+# ----------------------------------------------------------------------------
 
-EXAMPLE_SOURCES = InputSources(
-    potato_grid_file=_DATA1 / "PotatoZonning/CENAGRO_OnlyPotatoes_Pisco_Altitude.shp",
-    output_base=SIMCAST_INPUTS_DIR,
+# v2 (Oct 2026): PISCOt v1.2 tmax/tmin, PISCOeo_pm + TimesFM td, PISCOp v2 prec (to 2019-12)
+SIMCAST_INPUTS_V2 = _DATA1 / "simcast_inputs_v2"
+# v3 (Oct 2026): same tmax/tmin/td (symlinked to v2), prec from PISCOp v3.0 (1981-2025)
+SIMCAST_INPUTS_V3 = _DATA1 / "simcast_inputs_v3"
+SIMCAST_INPUTS_DIR = SIMCAST_INPUTS_V3
+
+SOURCES_V2 = InputSources(
+    potato_grid_file=_POTATO_GRID,
+    output_base=SIMCAST_INPUTS_V2,
     # PISCOt v1.2 (1981-2020), one NetCDF per year
     tmax_nc_dir=_DATA1 / "_raw/v1_2/tmax",
     tmin_nc_dir=_DATA1 / "_raw/v1_2/tmin",
@@ -109,6 +117,34 @@ EXAMPLE_SOURCES = InputSources(
     grid_index_file=_DATA1 / "tdew_medallion/silver/grid_index.parquet",
 )
 
+SOURCES_V3 = InputSources(
+    potato_grid_file=_POTATO_GRID,
+    output_base=SIMCAST_INPUTS_V3,
+    # PISCOp v3.0 daily precipitation, 0.1 deg, 1981-01-01 .. 2025-12-31
+    # (time axis Z1 is an index 1..16436), bilinear at the potato points.
+    prec_nc_file=_DATA1 / "PISCOp_d.nc",
+    prec_nc_var="precipitation",
+    prec_nc_start="1981-01-01",
+    prec_years=(1981, 2025),
+    prec_nan_policy="renormalize",
+    # tmax / tmin / td unchanged: reuse the v2 tree
+    link_from=SIMCAST_INPUTS_V2,
+    link_variables=("tmax", "tmin", "td"),
+    years=(1981, 2020),
+    grid_index_file=_DATA1 / "tdew_medallion/silver/grid_index.parquet",
+)
+
+EXAMPLE_SOURCES = SOURCES_V3
+
+# ----------------------------------------------------------------------------
+# Result trees (one per potato variety resistance class, SimcastConfig.vt)
+# ----------------------------------------------------------------------------
+
+RESULTS_ROOTS = {
+    "r": _DATA1 / "results_resistant_v3",
+    "s": _DATA1 / "results_susceptible_v3",
+}
+
 EXAMPLE_PATHS = PathsConfig(
     prec_data_file=_DATA1 / "prec/data.nc",
     resample_grid_file=_DATA1 / "tmin/tmin_daily_1981_01.nc",
@@ -116,8 +152,8 @@ EXAMPLE_PATHS = PathsConfig(
     tmax_nc_dir=_DATA1 / "tmax",
     tmin_nc_dir=_DATA1 / "tmin_v1",
     td_nc_dir=_DATA1 / "td",
-    potato_grid_file=EXAMPLE_SOURCES.potato_grid_file,
+    potato_grid_file=_POTATO_GRID,
     parquet_base_dir=SIMCAST_INPUTS_DIR,
-    results_root=_DATA1 / "results_resistant_v2",
+    results_root=RESULTS_ROOTS["r"],
     gadm_peru_gpkg="https://geodata.ucdavis.edu/gadm/gadm4.1/gpkg/gadm41_PER.gpkg",
 )

@@ -19,6 +19,26 @@ DEFAULT_GADM_CACHE_DIR = Path(
 ) / "simcast_spatial"
 DEFAULT_CMAP = "PuRd"
 DEFAULT_ALPHA = 0.65
+# Rasters animated per variable: glob inside <year>/<cultivo>/<region>/, colorbar
+# label and output file stem.  APP rasters are written by the SIMCAST step
+# (max APP per point); BU/FU rasters by `generate_bu_fu_rasters` (season sums).
+ANIMATION_VARIABLES = {
+    "APP": {
+        "raster_glob": "simcast_*.tif",
+        "label": "Fungicide applications per season (APP)",
+        "stem": "lateblight_all_lands_app",
+    },
+    "BU": {
+        "raster_glob": "BU_sum_*.tif",
+        "label": "Blight Units, season sum (BU)",
+        "stem": "lateblight_all_lands_bu",
+    },
+    "FU": {
+        "raster_glob": "FU_sum_*.tif",
+        "label": "Fungicide Units, season sum (FU)",
+        "stem": "lateblight_all_lands_fu",
+    },
+}
 DEFAULT_CULTIVOS = {
     "cultivo1": "Sierra Alta",
     "cultivo2": "Costa y Valle Interandino",
@@ -313,6 +333,8 @@ def create_all_lands_animation(
     alpha: float = DEFAULT_ALPHA,
     interval: int = 400,
     colorbar_label: str = "Blight Units",
+    title_prefix: str = "SIMCAST Results",
+    colorbar_extend: str = "neither",
 ):
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
@@ -341,7 +363,7 @@ def create_all_lands_animation(
 
     title = ax.text(0.5, 1.05, "", transform=ax.transAxes, ha="center", fontsize=14)
 
-    cbar = fig.colorbar(im)
+    cbar = fig.colorbar(im, extend=colorbar_extend)
     cbar.set_label(colorbar_label, labelpad=2)
 
     ax.set_xlabel("Longitude")
@@ -355,7 +377,7 @@ def create_all_lands_animation(
 
     def update(frame):
         im.set_data(all_data[frame])
-        title.set_text(f"SIMCAST Results – Year: {years[frame]}")
+        title.set_text(f"{title_prefix} – Year: {years[frame]}")
         return [im, title]
 
     anim = FuncAnimation(
@@ -381,3 +403,84 @@ def save_all_lands_animation(
         Path(os.fspath(mp4_path)).parent.mkdir(parents=True, exist_ok=True)
         writer = FFMpegWriter(fps=fps, bitrate=1800)
         anim.save(os.fspath(mp4_path), writer=writer, dpi=dpi)
+
+
+def make_all_lands_animation(
+    *,
+    results_root: str | os.PathLike[str],
+    variable: str,
+    start_year: int,
+    end_year: int,
+    out_dir: str | os.PathLike[str] | None = None,
+    gadm_peru_gpkg: str | os.PathLike[str] | None = DEFAULT_GADM_PERU_GPKG,
+    title_prefix: str | None = None,
+    vmax_percentile: float | None = 99.0,
+    fps: int = 3,
+    gif: bool = True,
+    mp4: bool = True,
+) -> dict[str, str]:
+    """
+    Build the yearly "all lands" animation for one variable (APP, BU or FU).
+
+    Sums the three cultivo rasters of each year (each point belongs to one
+    region, so the sum is that point's value) and writes
+    ``<out_dir>/<stem>.gif`` / ``.mp4`` (``out_dir`` defaults to
+    ``results_root``).  ``vmax_percentile`` caps the colour scale at that
+    percentile of all frames so a few extreme pixels do not wash out the map
+    (the colourbar then shows an arrow); ``None`` uses the true maximum.
+    """
+    spec = ANIMATION_VARIABLES[variable.upper()]
+    results_root = Path(os.fspath(results_root))
+    out_dir = Path(os.fspath(out_dir)) if out_dir is not None else results_root
+
+    paths_by_year = collect_paths_by_year(
+        results_root=results_root,
+        start_year=start_year,
+        end_year=end_year,
+        raster_glob=spec["raster_glob"],
+        strict=False,
+    )
+    years = sorted(paths_by_year)
+    all_data, extent, ref_crs, vmin, vmax, _ = build_all_lands_data(paths_by_year)
+    extend = "neither"
+    if vmax_percentile is not None:
+        vals = np.ma.stack(all_data).compressed()
+        if vals.size:
+            capped = float(np.percentile(vals, vmax_percentile))
+            if capped < float(vmax):
+                vmax, extend = capped, "max"
+
+    gadm0 = gadm1 = None
+    if gadm_peru_gpkg is not None:
+        try:
+            gadm0, gadm1 = load_gadm_peru(gadm_peru_gpkg)
+        except Exception as e:
+            logger.warning("Could not load GADM boundaries: %s", e)
+
+    import matplotlib.pyplot as plt
+
+    fig, _, anim = create_all_lands_animation(
+        all_data=all_data,
+        extent=extent,
+        years=years,
+        gadm_admin0=gadm0,
+        gadm_admin1=gadm1,
+        ref_crs=ref_crs,
+        vmin=vmin,
+        vmax=vmax,
+        colorbar_label=spec["label"],
+        title_prefix=title_prefix or f"SIMCAST {variable.upper()}",
+        colorbar_extend=extend,
+    )
+    out = {}
+    gif_path = out_dir / f"{spec['stem']}.gif" if gif else None
+    mp4_path = out_dir / f"{spec['stem']}.mp4" if mp4 else None
+    save_all_lands_animation(anim, gif_path=gif_path, mp4_path=mp4_path, fps=fps)
+    plt.close(fig)
+    if gif_path:
+        out["gif"] = os.fspath(gif_path)
+    if mp4_path:
+        out["mp4"] = os.fspath(mp4_path)
+    logger.info("%s animation: %d years (%d..%d), vmax=%.1f -> %s",
+                variable, len(years), years[0], years[-1], float(vmax), out)
+    return out

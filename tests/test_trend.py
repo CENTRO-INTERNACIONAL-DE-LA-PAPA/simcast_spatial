@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from trend_significance import (
+    add_point_attributes,
     aggregate_season_file,
     build_yearly_table,
     ols_trend_by_id,
@@ -103,3 +104,20 @@ def test_season_vs_calendar_aggregation(tmp_path):
     assert yearly.year.unique().tolist() == [2000]  # truncated 2001 excluded
     yearly = build_yearly_table(root, workers=1, exclude_truncated=False)
     assert sorted(yearly.year.unique()) == [2000, 2001]
+
+
+def test_add_point_attributes():
+    gpd = pytest.importorskip("geopandas")
+    from shapely.geometry import Point
+
+    grid = gpd.GeoDataFrame(
+        {"ID": [0, 1], "Alt": [3500, 120]},
+        geometry=[Point(-72.0, -13.5), Point(-77.0, -12.0)],
+        crs="EPSG:4326",
+    )
+    yearly = pd.DataFrame({"ID": [1, 0, 1], "year": [2000, 2000, 2001], "APP": [3, 5, 4]})
+    out = add_point_attributes(yearly, grid)
+    assert out.columns[:4].tolist() == ["ID", "lon", "lat", "altitude"]
+    assert out.loc[out.ID == 0, "altitude"].iloc[0] == 3500
+    assert out.loc[out.ID == 1, "lon"].tolist() == [-77.0, -77.0]
+    assert len(out) == 3

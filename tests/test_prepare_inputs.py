@@ -158,3 +158,64 @@ def test_build_td_from_predictions(tmp_path):
             bad, preds_dir=preds, out_dir=tmp_path / "td2", years=(2017, 2018),
             n_buckets=n_buckets, grid=GRID, workers=1,
         )
+
+
+def test_bilinear_weights_and_values():
+    from prepare_inputs import bilinear_at_points, bilinear_weights
+
+    lon = np.array([-80.05, -79.95, -79.85])  # centres, ascending
+    lat = np.array([0.05, -0.05, -0.15])  # descending
+    field = np.array([[[1, 2, 3], [4, 5, 6], [7, 8, 9]]], dtype=np.float32)
+    # f(lon, lat) is linear: 1 + 10*(lon+80.05) + 30*(0.05-lat)
+    px = np.array([-80.05, -80.0, -79.9, -79.85, -79.93])
+    py = np.array([0.05, 0.0, -0.1, -0.15, -0.02])
+    i0, j0, w = bilinear_weights(lon, lat, px, py)
+    np.testing.assert_allclose(w.sum(1), 1.0)
+    got = bilinear_at_points(field, i0, j0, w)[0]
+    expected = 1 + 10 * (px + 80.05) + 30 * (0.05 - py)
+    np.testing.assert_allclose(got, expected, rtol=1e-5)
+
+
+def test_bilinear_nan_policies():
+    from prepare_inputs import bilinear_at_points, bilinear_weights
+
+    lon = np.array([0.0, 1.0])
+    lat = np.array([1.0, 0.0])
+    field = np.array([[[np.nan, 2.0], [2.0, 2.0]]], dtype=np.float32)
+    i0, j0, w = bilinear_weights(lon, lat, np.array([0.5, 1.0]), np.array([0.5, 0.0]))
+    ren = bilinear_at_points(field, i0, j0, w, nan_policy="renormalize")[0]
+    pro = bilinear_at_points(field, i0, j0, w, nan_policy="propagate")[0]
+    assert ren[0] == pytest.approx(2.0)  # NaN corner dropped, weights rescaled
+    assert np.isnan(pro[0])
+    # point on a valid corner: the NaN corner has zero weight -> not NaN in either
+    assert ren[1] == pytest.approx(2.0) and pro[1] == pytest.approx(2.0)
+
+
+def test_extract_prec_bilinear_index_time(tmp_path):
+    from prepare_inputs import extract_prec_bilinear
+
+    n_t = 59  # 2001-01-01 .. 2001-02-28
+    lon = np.array([-80.05, -79.95, -79.85])
+    lat = np.array([0.05, -0.05, -0.15])
+    nc_path = tmp_path / "p.nc"
+    with netCDF4.Dataset(nc_path, "w") as nc:
+        nc.createDimension("Z1", n_t)
+        nc.createDimension("latitude", 3)
+        nc.createDimension("longitude", 3)
+        z = nc.createVariable("Z1", "i4", ("Z1",))
+        z.units = "unknown"
+        z[:] = np.arange(1, n_t + 1)
+        nc.createVariable("latitude", "f8", ("latitude",))[:] = lat
+        nc.createVariable("longitude", "f8", ("longitude",))[:] = lon
+        v = nc.createVariable("precipitation", "f4", ("Z1", "latitude", "longitude"),
+                              fill_value=np.float32(-1.175494e38))
+        data = np.arange(n_t, dtype=np.float32)[:, None, None] * np.ones((1, 3, 3), np.float32)
+        v[:] = data
+    mapping = pd.DataFrame({"ID": [1, 0], "lon": [-79.95, -80.0], "lat": [-0.05, 0.0]})
+    files = extract_prec_bilinear(nc_path, mapping, tmp_path / "out", start="2001-01-01",
+                                  years=(2001, 2001), workers=1)
+    assert len(files) == 2  # only Jan and Feb have data
+    feb = pd.read_parquet(tmp_path / "out" / "prec_daily_2001_02.parquet")
+    assert feb.ID.tolist()[:2] == [0, 0]
+    assert feb.FECHA.iloc[0] == pd.Timestamp("2001-02-01")
+    np.testing.assert_allclose(feb[feb.ID == 1].Value.to_numpy(), np.arange(31, 59))

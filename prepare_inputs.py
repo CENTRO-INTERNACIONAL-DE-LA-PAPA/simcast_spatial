@@ -23,9 +23,13 @@ Sources
 * ``td`` 1981-2016: PISCOeo_pm monthly NetCDFs (``td_daily_YYYY_MM.nc``).
 * ``td`` 2017-2020: TimesFM predictions (``id_bucket=NNNN/pred.parquet``,
   columns ``ID`` (PISCO gid), ``day`` (0 = 2017-01-01), ``pred``).
-* ``prec``: the monthly parquets produced earlier by ``masking.py`` from the
-  bilinearly resampled PISCOp product (1981-2019).  They are re-written in
-  the new sort order / dtypes.
+* ``prec`` (preferred): a single daily 0.1 deg NetCDF such as PISCOp v3.0
+  (``PISCOp_d.nc``, 1981-2025), bilinearly interpolated straight to the
+  potato points (see ``extract_prec_bilinear``).  This is the
+  "resample to 0.01 deg + pick the node" step of ``resampling.py`` +
+  ``masking.py`` done in one pass.
+* ``prec`` (legacy): the monthly parquets produced earlier by ``masking.py``
+  from PISCOp v2 (1981-2019), re-written in the new sort order / dtypes.
 
 All NetCDF extraction is done by *exact grid-cell indexing*: every potato
 point sits on a node of the 0.01 deg PISCO grid, so the value is
@@ -102,6 +106,16 @@ class InputSources:
     tmin_nc_dir: Path | None = None  # yearly tmin_daily_YYYY.nc
     td_nc_dir: Path | None = None  # monthly td_daily_YYYY_MM.nc
     prec_parquet_dir: Path | None = None  # prec_daily_YYYY_MM.parquet (potato IDs)
+    prec_nc_file: Path | None = None  # one daily NetCDF (e.g. PISCOp v3.0 PISCOp_d.nc)
+    prec_nc_var: str = "precipitation"
+    prec_nc_start: str = "1981-01-01"  # date of the first time step (time axis is an index)
+    prec_years: tuple[int, int] | None = None  # defaults to `years`
+    prec_nan_policy: str = "renormalize"  # or "propagate" (any NaN neighbour -> NaN)
+
+    # Variables to take, as symlinks, from an already built input tree
+    # (e.g. reuse tmax/tmin/td of simcast_inputs_v2 when only prec changes).
+    link_from: Path | None = None
+    link_variables: tuple[str, ...] = ()
 
     td_pred_dir: Path | None = None  # id_bucket=NNNN/pred.parquet
     td_pred_start: str = "2017-01-01"
@@ -452,6 +466,206 @@ def build_td_from_predictions(
 
 
 # ----------------------------------------------------------------------------
+# prec from a coarse daily NetCDF: bilinear interpolation at the points
+# ----------------------------------------------------------------------------
+
+
+def bilinear_weights(
+    src_lon: np.ndarray, src_lat: np.ndarray, px: np.ndarray, py: np.ndarray
+):
+    """
+    Indices and weights of the 2x2 source cells around every point.
+
+    ``src_lon`` / ``src_lat`` are the (regular) cell-centre coordinates of the
+    source grid; latitude may be descending.  Points outside the outer ring of
+    centres are clamped to the edge (same as GDAL).
+    Returns ``(i0, j0, w)`` with ``w`` shaped (n_points, 4) for the corners
+    (i0,j0), (i0,j0+1), (i0+1,j0), (i0+1,j0+1).
+    """
+    src_lon = np.asarray(src_lon, dtype=np.float64)
+    src_lat = np.asarray(src_lat, dtype=np.float64)
+    dx = (src_lon[-1] - src_lon[0]) / (len(src_lon) - 1)
+    dy = (src_lat[-1] - src_lat[0]) / (len(src_lat) - 1)
+    fx = (np.asarray(px, dtype=np.float64) - src_lon[0]) / dx
+    fy = (np.asarray(py, dtype=np.float64) - src_lat[0]) / dy
+    # snap values within 1e-6 cells of an integer (points on cell centres)
+    fx = np.where(np.abs(fx - np.rint(fx)) < 1e-6, np.rint(fx), fx)
+    fy = np.where(np.abs(fy - np.rint(fy)) < 1e-6, np.rint(fy), fy)
+    j0 = np.clip(np.floor(fx).astype(np.int64), 0, len(src_lon) - 2)
+    i0 = np.clip(np.floor(fy).astype(np.int64), 0, len(src_lat) - 2)
+    wx = np.clip(fx - j0, 0.0, 1.0)
+    wy = np.clip(fy - i0, 0.0, 1.0)
+    w = np.stack(
+        [(1 - wy) * (1 - wx), (1 - wy) * wx, wy * (1 - wx), wy * wx], axis=1
+    )
+    return i0, j0, w
+
+
+def bilinear_at_points(
+    field: np.ndarray,
+    i0: np.ndarray,
+    j0: np.ndarray,
+    w: np.ndarray,
+    *,
+    nan_policy: str = "renormalize",
+) -> np.ndarray:
+    """
+    Interpolate ``field`` (time, lat, lon) at the points -> (time, n_points).
+
+    ``nan_policy="renormalize"``: NaN corners (sea, outside the product) are
+    dropped and the remaining weights rescaled; NaN only when every corner
+    with a non-zero weight is NaN.  ``"propagate"``: NaN when any corner with
+    a non-zero weight is NaN.
+    """
+    corners = (
+        field[:, i0, j0],
+        field[:, i0, j0 + 1],
+        field[:, i0 + 1, j0],
+        field[:, i0 + 1, j0 + 1],
+    )
+    num = np.zeros(corners[0].shape, dtype=np.float64)
+    den = np.zeros(corners[0].shape, dtype=np.float64)
+    any_nan = np.zeros(corners[0].shape, dtype=bool)
+    for k, c in enumerate(corners):
+        wk = w[:, k][None, :]
+        bad = np.isnan(c)
+        use = (~bad) & (wk > 0)
+        num += np.where(use, wk * np.where(bad, 0.0, c), 0.0)
+        den += np.where(use, wk, 0.0)
+        any_nan |= bad & (wk > 0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = num / den
+    out[den <= 0] = np.nan
+    if nan_policy == "propagate":
+        out[any_nan] = np.nan
+    elif nan_policy != "renormalize":
+        raise ValueError("nan_policy must be 'renormalize' or 'propagate'")
+    return out.astype(np.float32)
+
+
+def extract_prec_bilinear(
+    nc_file: str | os.PathLike[str],
+    mapping: pd.DataFrame,
+    out_dir: str | os.PathLike[str],
+    *,
+    var_name: str = "precipitation",
+    start: str = "1981-01-01",
+    years: tuple[int, int] = (1981, 2025),
+    variable: str = "prec",
+    nan_policy: str = "renormalize",
+    overwrite: bool = False,
+    workers: int = 8,
+    row_group_ids: int = 5000,
+    compression: str = "zstd",
+) -> list[str]:
+    """
+    Bilinearly interpolate a daily (time, lat, lon) NetCDF to the potato
+    points and write monthly ``<variable>_daily_YYYY_MM.parquet``.
+
+    The time axis may be a plain index (PISCOp v3.0 ``Z1`` = 1..N); dates
+    are ``start + k`` days.  If the time variable has CF units they are used
+    instead.  The whole cube is read once (PISCOp v3.0: 2.4 GB).
+
+    Equivalent to ``resampling.py`` (GDAL bilinear to the 0.01 deg grid) +
+    ``masking.py`` (pick the node): on PISCOp v2 it reproduces the old prec
+    parquets to < 1e-5 mm wherever all four neighbours are land.
+    """
+    out_dir = Path(os.fspath(out_dir))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    y0, y1 = years
+    months = [(y, m) for y in range(y0, y1 + 1) for m in range(1, 13)]
+    outputs = {(y, m): out_dir / f"{variable}_daily_{y}_{m:02d}.parquet" for y, m in months}
+    todo = [k for k, p in outputs.items() if overwrite or not p.exists()]
+    if not todo:
+        return [os.fspath(p) for p in outputs.values()]
+
+    with netCDF4.Dataset(os.fspath(nc_file)) as nc:
+        var = nc.variables[var_name]
+        tdim, ydim, xdim = var.dimensions
+        lat_name = ydim if ydim in nc.variables else ("latitude" if "latitude" in nc.variables else "lat")
+        lon_name = xdim if xdim in nc.variables else ("longitude" if "longitude" in nc.variables else "lon")
+        src_lat = nc.variables[lat_name][:].astype(np.float64)
+        src_lon = nc.variables[lon_name][:].astype(np.float64)
+        n_t = var.shape[0]
+        tv = nc.variables.get(tdim)
+        units = getattr(tv, "units", "") if tv is not None else ""
+        if " since " in units:
+            dates = _nc_times(nc, tdim)
+        else:
+            dates = pd.date_range(pd.Timestamp(start), periods=n_t, freq="D")
+        print(f"[prec] reading {nc_file} ({n_t} days, {dates[0].date()} .. {dates[-1].date()})")
+        cube = np.ma.filled(np.ma.asarray(var[:, :, :], dtype=np.float32), np.nan)
+    cube[~np.isfinite(cube)] = np.nan
+    cube[np.abs(cube) > 1e30] = np.nan  # e.g. _FillValue -1.17e38 if not masked
+    neg = int((cube < 0).sum())
+    if neg:
+        print(f"[prec] WARNING {neg} negative values set to 0")
+        cube[cube < 0] = 0.0
+
+    # check the points are inside the source domain
+    px = mapping["lon"].to_numpy()
+    py = mapping["lat"].to_numpy()
+    if px.min() < src_lon.min() or px.max() > src_lon.max() or py.min() < min(
+        src_lat.min(), src_lat.max()
+    ) or py.max() > max(src_lat.min(), src_lat.max()):
+        raise ValueError("Some points fall outside the precipitation grid")
+
+    i0, j0, w = bilinear_weights(src_lon, src_lat, px, py)
+    ids = mapping["ID"].to_numpy().astype(np.int32)
+    order = np.argsort(ids, kind="stable")
+
+    def _one(ym):
+        y, m = ym
+        sel = np.flatnonzero((dates.year == y) & (dates.month == m))
+        if sel.size == 0:
+            return None
+        vals = bilinear_at_points(cube[sel], i0, j0, w, nan_policy=nan_policy)[:, order]
+        n_days, n_pts = vals.shape
+        _write_month(
+            outputs[ym],
+            np.repeat(ids[order], n_days),
+            np.tile(dates[sel].to_numpy(), n_pts),
+            np.ascontiguousarray(vals.T).ravel(),
+            row_group_ids=row_group_ids,
+            compression=compression,
+        )
+        return os.fspath(outputs[ym])
+
+    written = []
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        for r in tqdm(ex.map(_one, todo), total=len(todo), desc=f"{variable} bilinear"):
+            if r:
+                written.append(r)
+    missing = [f"{y}-{m:02d}" for (y, m) in todo if not outputs[(y, m)].exists()]
+    if missing:
+        print(f"[prec] no source data for {len(missing)} months (first {missing[0]})")
+    return written
+
+
+def link_variables(
+    base: str | os.PathLike[str],
+    other_base: str | os.PathLike[str],
+    variables,
+) -> None:
+    """Make ``<base>/<var>`` a symlink to ``<other_base>/<var>`` (reuse inputs)."""
+    base = Path(os.fspath(base))
+    other_base = Path(os.fspath(other_base))
+    for v in variables:
+        target = other_base / v
+        link = base / v
+        if not target.is_dir():
+            raise FileNotFoundError(target)
+        if link.is_symlink():
+            if Path(os.readlink(link)) == target:
+                continue
+            link.unlink()
+        elif link.exists():
+            raise FileExistsError(f"{link} exists and is not a symlink")
+        link.symlink_to(target, target_is_directory=True)
+        print(f"[prepare] {link} -> {target}")
+
+
+# ----------------------------------------------------------------------------
 # Orchestration
 # ----------------------------------------------------------------------------
 
@@ -513,6 +727,10 @@ def prepare_all(
     """
     base = Path(os.fspath(src.output_base))
     base.mkdir(parents=True, exist_ok=True)
+
+    if src.link_from is not None and src.link_variables:
+        link_variables(base, src.link_from, src.link_variables)
+        variables = tuple(v for v in variables if v not in src.link_variables)
 
     mapping_path = base / "grid_mapping.parquet"
     mapping = build_grid_mapping(
@@ -577,8 +795,8 @@ def prepare_all(
                 )
             )
 
-    # prec: re-write existing parquets
-    if "prec" in variables and src.prec_parquet_dir is not None:
+    # prec: re-write existing parquets (legacy; ignored when prec_nc_file is set)
+    if "prec" in variables and src.prec_parquet_dir is not None and src.prec_nc_file is None:
         for y, m in _month_range(src.years):
             out = _out("prec", y, m)
             if out.exists() and not overwrite:
@@ -614,6 +832,22 @@ def prepare_all(
                     failures.append((label, repr(e)))
                     print(f"[prepare] FAILED {label}: {e!r}")
 
+    # prec from a daily NetCDF (PISCOp v3.0): bilinear at the points
+    if "prec" in variables and src.prec_nc_file is not None:
+        extract_prec_bilinear(
+            src.prec_nc_file,
+            mapping,
+            base / "prec" / "Outputs",
+            var_name=src.prec_nc_var,
+            start=src.prec_nc_start,
+            years=src.prec_years or src.years,
+            nan_policy=src.prec_nan_policy,
+            overwrite=overwrite,
+            workers=workers,
+            row_group_ids=src.row_group_ids,
+            compression=src.compression,
+        )
+
     # td 2017-2020 from predictions
     if "td" in variables and src.td_pred_dir is not None:
         build_td_from_predictions(
@@ -631,7 +865,8 @@ def prepare_all(
             compression=src.compression,
         )
 
-    report = check_layout(base, variables=variables, years=src.years)
+    all_vars = tuple(dict.fromkeys((*variables, *src.link_variables)))
+    report = check_layout(base, variables=all_vars, years=src.years)
     prov = {
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "git_commit": _git_commit(),
@@ -643,8 +878,18 @@ def prepare_all(
             "tmax/tmin: PISCOt v1.2 (Huerta et al. 2023), exact cell indexing. "
             "td 1981-2016: PISCOeo_pm dew point (Huerta et al. 2022), exact cell indexing. "
             "td 2017-2020: TimesFM 3.0 predictions (research product, non-commercial "
-            "weights, no observed truth). prec: PISCOp resampled bilinearly to 0.01 deg, "
-            "extracted earlier with masking.py."
+            "weights, no observed truth). "
+            + (
+                f"prec: {Path(src.prec_nc_file).name} (PISCOp v3.0, Gutierrez et al. 2026) "
+                f"interpolated bilinearly at the points, nan_policy={src.prec_nan_policy}."
+                if src.prec_nc_file is not None
+                else "prec: PISCOp v2 resampled bilinearly to 0.01 deg, extracted earlier with masking.py."
+            )
+            + (
+                f" Variables {list(src.link_variables)} are symlinks to {src.link_from}."
+                if src.link_variables
+                else ""
+            )
         ),
     }
     with open(base / "provenance.json", "w") as fh:

@@ -9,17 +9,38 @@ This repo contains a **Python-only pipeline** (extracted from a Colab notebook) 
 
 The code is currently tuned to the original Peru potato-zoning workflow, but the goal is to make it reusable by **passing paths + resource settings from `main.py`** instead of editing module code.
 
-## 2026 rerun (dew point extended to 2020)
+## 2026 rerun (dew point extended to 2020, PISCOp v3.0)
 
 The SIMCAST inputs are now built by **`prepare_inputs.py`** from these sources
-(see `config.EXAMPLE_SOURCES`), instead of the legacy resampling + masking steps:
+(see `config.SOURCES_V3`, the default `EXAMPLE_SOURCES`), instead of the legacy
+resampling + masking steps:
 
 | variable | years | source | method |
 |---|---|---|---|
 | `tmax`, `tmin` | 1981–2020 | PISCOt v1.2 yearly NetCDFs (`_raw/v1_2/{tmax,tmin}/`) | exact grid-cell indexing |
 | `td` | 1981–2016 | PISCOeo_pm monthly NetCDFs (`_raw/v1_1/td/`) | exact grid-cell indexing |
 | `td` | 2017–2020 | TimesFM 3.0 predictions (`/home/cvelasquez/tdew_timesfm/preds_real/id_bucket=NNNN/pred.parquet`, column `pred`, `day` 0 = 2017‑01‑01, bucket = `gid % 8192`) | ID remap |
-| `prec` | 1981–2019 | existing `prec/Outputs/*.parquet` (PISCOp resampled bilinearly) | re-written |
+| `prec` | 1981–2025 | **PISCOp v3.0** daily 0.1° (`PISCOp_d.nc`, Gutierrez et al. 2026; time axis `Z1` = day index from 1981‑01‑01) | bilinear interpolation at the points |
+
+Two input trees exist (`config.py`):
+
+- `simcast_inputs_v2`: as above but `prec` from PISCOp v2 (1981–2019, old parquets re-written).
+- `simcast_inputs_v3` (default): `prec` from PISCOp v3.0; `tmax`, `tmin`, `td` are
+  symlinks to the v2 tree (`InputSources.link_from` / `link_variables`).
+
+**Precipitation "resampling".** The legacy workflow resampled the 0.1° product to
+the 0.01° grid with GDAL bilinear (`resampling.py`, ~350 MB NetCDF per month) and
+then picked the node under each point (`masking.py`). `extract_prec_bilinear` does
+both in one pass, interpolating straight at the 302 k points (2.4 GB cube read
+once, ~4 min for 1981–2025). On PISCOp v2 it reproduces the old prec parquets to
+< 2e‑5 mm. The only difference is the coastal mask: GDAL returned NaN when any of
+the 4 neighbouring 0.1° cells was sea, and SIMCAST then filled those NaN with
+**0 mm** (1 632 points, 0.5 %). The default `prec_nan_policy="renormalize"` drops
+sea cells and rescales the remaining weights, so those points get real rainfall;
+`"propagate"` reproduces the old mask.
+
+PISCOp v3.0 vs v2 at the potato points (sample months 1985–2019): v3 is 7–30 %
+drier on average, daily correlation 0.59–0.71, monthly-total correlation 0.86–0.95.
 
 Every potato point sits exactly on a node of the 0.01° PISCO grid, so values are
 read as `var[t, row, col]` (no interpolation). This reproduces bit-for-bit the
@@ -39,10 +60,11 @@ uv run python prepare_inputs.py --workers 8
 
 (idempotent: existing monthly files are skipped; ~15 min for all variables).
 
-Known gaps: `prec` ends in 2019‑12, so the 2020 seasons (`cultivo2`/`cultivo3`
-2020) and the tail of `cultivo1` 2019 (Jan–Apr 2020) have no precipitation and
-are skipped/truncated. Each season folder now contains a `coverage.json` saying
-whether it was truncated.
+Coverage: with PISCOp v3.0 every season up to 2020 is complete. `cultivo1`
+2020 (Nov 2020–Apr 2021) is not run because `tmax`/`tmin`/`td` end in 2020‑12.
+With the v2 inputs, `prec` ended in 2019‑12, so `cultivo2`/`cultivo3` 2020 were
+empty and `cultivo1` 2019 truncated. Each season folder contains a
+`coverage.json` saying whether it was truncated.
 
 > The 2017–2020 dew point is a **model prediction without observed truth**
 > (TimesFM 3.0 weights are non-commercial; research deliverable, not
@@ -84,9 +106,21 @@ Each Parquet must contain at least: `ID`, `FECHA`, `Value`.
 
 ## Running the pipeline
 
-`main.py` is the example entry point. Edit the paths + toggles there and run:
+`main.py` is the entry point. Paths live in `config.py`; steps and varieties
+are chosen on the command line:
 
-- `python main.py`
+```bash
+uv run python main.py --steps prepare
+```
+
+```bash
+uv run python main.py --steps simcast rasters trend maps animations --vt r s
+```
+
+Steps: `prepare`, `resampling`, `masking` (legacy), `simcast`, `rasters`,
+`trend`, `maps`, `animations`. `--vt` takes the resistance classes
+(`s`, `ms`, `mr`, `r`, `hr`); each one writes to `config.RESULTS_ROOTS[vt]`
+(`results_resistant_v3`, `results_susceptible_v3`).
 
 ### Step 1 — Resampling (prec only)
 
@@ -209,7 +243,7 @@ It reads all `simcast_results.parquet` under `results_root`, aggregates to **one
 
 Code lives in `trend_significance.py`:
 
-- `compute_trend_stats(...)` writes a stats parquet (e.g. `statistical_trends_all.parquet`) with columns like `slope_app`, `p_value_app`, `std_err_app`, `conf_int_lower_app`, `conf_int_upper_app`, `r_squared_app`, `n_years_app` (and the same for `abu`/`afu`), one row per potato-grid ID, plus the yearly table (`yearly_aggregated_data.parquet`: `ID, year, period, region, APP, ABU, AFU, n_days`).
+- `compute_trend_stats(...)` writes a stats parquet (e.g. `statistical_trends_all.parquet`) with columns like `slope_app`, `p_value_app`, `std_err_app`, `conf_int_lower_app`, `conf_int_upper_app`, `r_squared_app`, `n_years_app` (and the same for `abu`/`afu`), one row per potato-grid ID, plus the yearly table (`yearly_aggregated_data.parquet`: `ID, lon, lat, altitude, year, period, region, APP, ABU, AFU, n_days`; `altitude` is the `Alt` column of the potato grid, m a.s.l.).
 - `create_significance_map(...)` writes a PNG showing significant increase/decrease/not-significant for a chosen `variable_prefix` (`app`, `abu`, `afu`).
 - `create_coefficient_map(...)` writes a PNG showing slope magnitude for significant points.
 
@@ -231,14 +265,23 @@ Uses `animation_all_lands.generate_bu_fu_rasters(...)` to write:
 
 Rasters are built with the vectorised grid writer shared with `load_variables.create_raster` (pixel-identical to the previous `iterrows` version, ~2 s instead of ~40 s per raster), in parallel over season files, skipping rasters that already exist.
 
-### Step 5 — “All lands” animation
+### Step 5 — “All lands” animations (APP, BU, FU)
 
-Uses:
+`animation_all_lands.make_all_lands_animation(results_root=..., variable=...)`
+writes one GIF and one MP4 per variable into the results root:
 
-- `collect_paths_by_year(...)`
-- `build_all_lands_data(...)`
-- `create_all_lands_animation(...)`
-- `save_all_lands_animation(...)`
+| variable | rasters used | output |
+|---|---|---|
+| `APP` | `simcast_<year>_<period>_<region>.tif` (max APP, written by the SIMCAST step) | `lateblight_all_lands_app.{gif,mp4}` |
+| `BU` | `BU_sum_*.tif` | `lateblight_all_lands_bu.{gif,mp4}` |
+| `FU` | `FU_sum_*.tif` | `lateblight_all_lands_fu.{gif,mp4}` |
+
+Each frame is one year, adding the three cultivo rasters (every point belongs
+to one region). The colour scale is capped at the 99th percentile of all frames
+(`vmax_percentile`, the colourbar shows an arrow) so a few extreme pixels do not
+wash out the map; pass `None` for the true maximum. The lower-level helpers
+(`collect_paths_by_year`, `build_all_lands_data`, `create_all_lands_animation`,
+`save_all_lands_animation`) are unchanged.
 
 Optional: boundary overlay via GADM (`animation_all_lands.load_gadm_peru`). A URL is downloaded once to `~/.cache/simcast_spatial/` and reused by every map; if you can’t access the URL, download the `.gpkg` and point to the local path. Years without any BU raster (e.g. 2020, which has no `prec`) are skipped.
 
