@@ -5,28 +5,34 @@ def main():
     Edit the paths/toggles below to run individual steps.
     """
 
-    from config import EXAMPLE_PATHS, ResourcesConfig, SimcastConfig
+    from config import EXAMPLE_PATHS, EXAMPLE_SOURCES, ResourcesConfig, SimcastConfig
 
     # ------------------------------------------------------------------
     # 0) EDIT ME: paths + compute settings
     # ------------------------------------------------------------------
     paths = EXAMPLE_PATHS
+    sources = EXAMPLE_SOURCES
     resources = ResourcesConfig(
         resampling_workers=6,
         masking_workers=6,
+        prepare_workers=8,
         masking_chunk_size=10_000,
-        simcast_batch_size=300,
-        dask_n_workers=8,
-        dask_threads_per_worker=4,
-        dask_memory_limit="14GB",
+        simcast_id_chunk_size=5_000,
+        dask_n_workers=20,
+        dask_threads_per_worker=1,
+        dask_memory_limit="5GB",
     )
-    sim_cfg = SimcastConfig(vt="r")
+    sim_cfg = SimcastConfig(vt="r", timezone="America/Lima", sun_method="noaa")
+
+    START_YEAR = 1981
+    END_YEAR = 2020  # last year with tmax/tmin/td inputs (prec ends 2019-12)
 
     # ------------------------------------------------------------------
     # 1) Toggle steps on/off
     # ------------------------------------------------------------------
-    RUN_RESAMPLING = False
-    RUN_MASKING = False
+    RUN_PREPARE_INPUTS = False  # build <parquet_base_dir> from the 2026 sources
+    RUN_RESAMPLING = False  # legacy: prec NetCDF resampling
+    RUN_MASKING = False  # legacy: NetCDF -> parquet with masking.py
     RUN_SIMCAST = False
     RUN_BU_FU_RASTERS = False
     RUN_ALL_LANDS_ANIMATION = False
@@ -35,7 +41,16 @@ def main():
     RUN_TREND_COEFFICIENT_MAPS = False
 
     # ------------------------------------------------------------------
-    # 2) Resampling (prec only)
+    # 2a) Input preparation (2026 rerun): PISCOt v1.2 tmax/tmin, PISCOeo_pm td
+    #     (1981-2016), TimesFM td (2017-2020), existing prec parquets.
+    # ------------------------------------------------------------------
+    if RUN_PREPARE_INPUTS:
+        from prepare_inputs import prepare_all
+
+        prepare_all(sources, workers=resources.prepare_workers)
+
+    # ------------------------------------------------------------------
+    # 2b) Legacy resampling (prec only)
     # ------------------------------------------------------------------
     if RUN_RESAMPLING:
         from resampling import run_resampling
@@ -48,7 +63,7 @@ def main():
         )
 
     # ------------------------------------------------------------------
-    # 3) Masking / extraction (NetCDF -> monthly Parquet)
+    # 3) Legacy masking / extraction (NetCDF -> monthly Parquet)
     # ------------------------------------------------------------------
     if RUN_MASKING:
         from masking import extract_folder_to_parquets
@@ -80,8 +95,8 @@ def main():
         from load_variables import parallel_simcast_pipeline
 
         parallel_simcast_pipeline(
-            start_year=1981,
-            end_year=2019,
+            start_year=START_YEAR,
+            end_year=END_YEAR,
             vt=sim_cfg.vt,
             base_path=paths.parquet_base_dir,
             potato_grid_file=paths.potato_grid_file,
@@ -92,11 +107,14 @@ def main():
             dashboard_address=resources.dask_dashboard_address,
             write_tiff=True,
             show_task_bar=True,
-            batch_size=resources.simcast_batch_size,
+            id_chunk_size=resources.simcast_id_chunk_size,
+            skip_existing=True,  # rerun resumes where it stopped
+            max_data_year=END_YEAR,
             rh_thresh=sim_cfg.rh_thresh,
             timezone=sim_cfg.timezone,
             min_day=sim_cfg.min_day,
             forced_day=sim_cfg.forced_day,
+            sun_method=sim_cfg.sun_method,
         )
 
     # ------------------------------------------------------------------
@@ -113,7 +131,7 @@ def main():
             potato_grid_file=paths.potato_grid_file,
             output_stats_parquet_path=stats_parquet_path,
             output_yearly_data_path=yearly_parquet_path,
-            year_range=(1981, 2020),
+            year_range=(START_YEAR, END_YEAR),
             batch_size=500,
             min_years=10,
             n_workers=resources.dask_n_workers,
@@ -174,8 +192,8 @@ def main():
 
         paths_by_year = collect_paths_by_year(
             results_root=paths.results_root,
-            start_year=1981,
-            end_year=2019,
+            start_year=START_YEAR,
+            end_year=END_YEAR,
             strict=False,  # keep years even if one cultivo is missing
         )
         years = sorted(paths_by_year)

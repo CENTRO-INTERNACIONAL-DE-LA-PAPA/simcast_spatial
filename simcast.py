@@ -1,10 +1,9 @@
 import numba as nb
 import numpy as np
 import pandas as pd
-import pytz
-from astral import LocationInfo
-from astral.sun import sunrise, sunset
 from numba import njit
+
+from solar import standard_utc_offset_hours, sunrise_sunset_hours
 
 # ------------------------------------------------------------------
 # 1.  Vectorised BU / FU kernels
@@ -302,12 +301,35 @@ def diurnal_temp(
     return T
 
 
+def _sun_hours_astral(dates: pd.Series, lon: float, lat: float, timezone: str):
+    """Original per-day astral path (slow; civil time incl. historical DST)."""
+    import pytz
+    from astral import LocationInfo
+    from astral.sun import sunrise, sunset
+
+    loc = LocationInfo(latitude=lat, longitude=lon)
+    tz = pytz.timezone(timezone)
+    sr = dates.apply(lambda d: sunrise(loc.observer, date=d, tzinfo=tz))
+    ss = dates.apply(lambda d: sunset(loc.observer, date=d, tzinfo=tz))
+    Hn = (sr.dt.hour + sr.dt.minute / 60 + sr.dt.second / 3600).to_numpy(np.float32)
+    Ho = (ss.dt.hour + ss.dt.minute / 60 + ss.dt.second / 3600).to_numpy(np.float32)
+    return Hn, Ho
+
+
+def _sun_hours_noaa(dates: pd.Series, lon: float, lat: float, timezone: str):
+    """Vectorised NOAA sunrise/sunset with the zone's standard UTC offset."""
+    off = standard_utc_offset_hours(timezone)
+    sr, ss = sunrise_sunset_hours(lat, lon, dates.to_numpy(), utc_offset_hours=off)
+    return sr.astype(np.float32), ss.astype(np.float32)
+
+
 def calculate_hhr(
     climdata: pd.DataFrame,
     lon: float,
     lat: float,
     rh_thresh: float = 90.0,
-    timezone: str = "America/Bogota",
+    timezone: str = "America/Lima",
+    sun_method: str = "noaa",
 ) -> pd.DataFrame:
     """
     Hour‑by‑hour humidity model (García‑1) with flexible RH threshold
@@ -318,6 +340,11 @@ def calculate_hhr(
     climdata  : DataFrame with columns [FECHA, TMIN, TMAX, TDEW, PP]
     lon, lat  : point coordinates (float)
     rh_thresh : RH % threshold (default 90)
+    timezone  : IANA zone of the local clock (Peru: "America/Lima")
+    sun_method: "noaa" (vectorised, fixed UTC offset, ~15x faster) or
+                "astral" (original per-day library calls; inherits the
+                historical DST periods of the tz database, e.g. May 1992 -
+                Apr 1993 for America/Bogota).
 
     Returns
     -------
@@ -335,14 +362,12 @@ def calculate_hhr(
     df["tavg_C"] = (df["TMIN"] + df["TMAX"]) / 2.0
 
     # --- sunrise / sunset in decimal hours ----------------------------
-    loc = LocationInfo(latitude=lat, longitude=lon)
-    tz = pytz.timezone(timezone)
-
-    sr = df["FECHA"].apply(lambda d: sunrise(loc.observer, date=d, tzinfo=tz))
-    ss = df["FECHA"].apply(lambda d: sunset(loc.observer, date=d, tzinfo=tz))
-
-    Hn = (sr.dt.hour + sr.dt.minute / 60 + sr.dt.second / 3600).to_numpy(np.float32)
-    Ho = (ss.dt.hour + ss.dt.minute / 60 + ss.dt.second / 3600).to_numpy(np.float32)
+    if sun_method == "noaa":
+        Hn, Ho = _sun_hours_noaa(df["FECHA"], lon, lat, timezone)
+    elif sun_method == "astral":
+        Hn, Ho = _sun_hours_astral(df["FECHA"], lon, lat, timezone)
+    else:
+        raise ValueError(f"unknown sun_method {sun_method!r} (use 'noaa' or 'astral')")
 
     # --- hourly temp grid (n, 24) -------------------------------------
     T_model = diurnal_temp(
