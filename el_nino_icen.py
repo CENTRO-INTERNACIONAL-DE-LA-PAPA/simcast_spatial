@@ -1,0 +1,409 @@
+"""
+How SIMCAST outputs respond to El Niño Costero, season by season.
+
+Each potato point has ONE season per SIMCAST year, fixed by its region:
+
+    Sierra Media               (cultivo3)  Apr - Jul of Y
+    Costa y Valle Interandino  (cultivo2)  Jul - Dec of Y
+    Sierra Alta                (cultivo1)  Nov of Y - Apr of Y+1
+
+El Niño is measured during THAT season: the mean of the official monthly
+ICEN (ENFEN 2024; ``reference/icen_enfen2024.txt``) over the season's months.
+So a Sierra Alta season Nov 1998 - Apr 1999 (ICEN -0.37) is a neutral season
+even though 1998 belongs to the 1997-98 event.
+
+Analysis (1981-2019; 2020 has no Sierra Alta season)
+----------------------------------------------------
+* Per point: least-squares slope of the season value (APP, BU, FU) on the
+  season-mean ICEN, over the 39 seasons (El Niño, La Niña and neutral).
+  Mapped in standard deviations of the variable per +1 ICEN.
+* Per unit (SIMCAST region x Norte >= -9 deg / Centro / Sur < -15 deg): the
+  same regression on the unit-mean series, in variable units and %.
+* Significance: permutation test that reassigns the ICEN series to the
+  years in blocks of two consecutive years (random block offset), so a
+  two-year event such as 1997-98 moves as one piece.  The same permutation
+  is applied to every point, which keeps spatial correlation, and gives the
+  field significance (Livezey & Chen 1983): is the share of points with
+  local p < 0.05 larger than under the permutations?
+
+Outputs in ``<results_root>/el_nino_icen/``
+-------------------------------------------
+* ``icen_slope_maps_<variety>.png``  - slope maps APP / BU / FU, stippled
+  where local p < 0.05, field significance in each panel.
+* ``icen_scatter_regions_<variety>.png`` - per unit and variable, season
+  ICEN vs. unit anomaly with the fitted line, slope, r and p.
+* ``icen_regional_<variety>.csv`` - the data behind the scatter plots.
+* ``icen_summary_<variety>.json`` - regional slopes and field significance.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+SEASON_MONTHS = {  # region -> (first, last) month offset from January of Y
+    "Sierra Media": (3, 6),
+    "Costa y Valle Interandino": (6, 11),
+    "Sierra Alta": (10, 15),
+}
+VARIABLES = {  # yearly-table column -> (label, anomaly unit for the scatter, sd floor)
+    "APP": ("APP", "aplicaciones", 0.5),
+    "ABU": ("BU", "%", 0.5),
+    "AFU": ("FU", "%", 0.5),
+}
+ZONES = [("Norte", -9.0, 90.0), ("Centro", -15.0, -9.0), ("Sur", -90.0, -15.0)]
+REGION_ORDER = ["Costa y Valle Interandino", "Sierra Media", "Sierra Alta"]
+REGION_SHORT = {"Costa y Valle Interandino": "Costa/VI", "Sierra Media": "S. Media", "Sierra Alta": "S. Alta"}
+REGION_SEASON = {"Costa y Valle Interandino": "jul–dic", "Sierra Media": "abr–jul", "Sierra Alta": "nov–abr"}
+
+# ENFEN (2024) ICEN categories, applied to the season mean
+CATEGORIES = [
+    ("fría", -np.inf, -0.7),
+    ("neutra", -0.7, 0.5),
+    ("cálida débil", 0.5, 1.3),
+    ("cálida moderada", 1.3, 2.1),
+    ("cálida fuerte", 2.1, 3.5),
+    ("cálida extraordinaria", 3.5, np.inf),
+]
+
+
+# ----------------------------------------------------------------------------
+# ICEN
+# ----------------------------------------------------------------------------
+
+
+def load_icen(path) -> pd.Series:
+    t = pd.read_csv(path, comment="%", sep=r"\s+", names=["year", "month", "icen"])
+    idx = pd.PeriodIndex.from_fields(year=t["year"], month=t["month"], freq="M")
+    return pd.Series(t["icen"].to_numpy(), index=idx).sort_index()
+
+
+def season_icen(icen: pd.Series, years) -> pd.DataFrame:
+    """Mean ICEN over each region's season months; index = year, columns = region."""
+    out = {}
+    for region, (a, b) in SEASON_MONTHS.items():
+        vals = []
+        for y in years:
+            jan = pd.Period(f"{y}-01", freq="M")
+            months = pd.period_range(jan + a, jan + b, freq="M")
+            missing = [m for m in months if m not in icen.index]
+            if missing:
+                raise ValueError(f"ICEN missing for {missing[:3]}")
+            vals.append(float(icen.loc[months].mean()))
+        out[region] = vals
+    return pd.DataFrame(out, index=list(years))
+
+
+def category(v: float) -> str:
+    for name, lo, hi in CATEGORIES:
+        if lo <= v < hi:
+            return name
+    return "neutra"
+
+
+def season_label(region: str, year: int) -> str:
+    return f"{year}/{str(year + 1)[-2:]}" if region == "Sierra Alta" else str(year)
+
+
+# ----------------------------------------------------------------------------
+# Permutations
+# ----------------------------------------------------------------------------
+
+
+def block_permutations(n: int, n_perm: int, *, block: int = 2, seed: int = 0) -> np.ndarray:
+    """(n_perm, n) permutations of 0..n-1 that move consecutive blocks together."""
+    rng = np.random.default_rng(seed)
+    perms = np.empty((n_perm, n), dtype=np.int64)
+    for j in range(n_perm):
+        off = rng.integers(0, block)
+        cuts = [0] + list(range(off if off else block, n, block)) + [n]
+        blocks = [np.arange(a, b) for a, b in zip(cuts[:-1], cuts[1:]) if b > a]
+        order = rng.permutation(len(blocks))
+        perms[j] = np.concatenate([blocks[i] for i in order])
+    return perms
+
+
+# ----------------------------------------------------------------------------
+# Regression
+# ----------------------------------------------------------------------------
+
+
+def slopes_with_permutation(y: np.ndarray, x: np.ndarray, perms: np.ndarray, *,
+                            local_alpha: float = 0.05, chunk: int = 2_000):
+    """
+    OLS slope of each row of ``y`` (points x years) on ``x`` (years), with
+    permutation p-values and the per-permutation count of locally
+    significant rows (for field significance).
+    """
+    xc = x - x.mean()
+    ssx = float(xc @ xc)
+    xp = xc[perms].T.astype(np.float32)  # (years, n_perm)
+    yc = (y - y.mean(axis=1, keepdims=True)).astype(np.float32)
+    b = (yc @ xc.astype(np.float32)) / ssx
+    p = np.empty(len(y))
+    field = np.zeros(perms.shape[0], dtype=np.int64)
+    for a in range(0, len(y), chunk):
+        bp = np.abs((yc[a:a + chunk] @ xp) / ssx)
+        obs = np.abs(b[a:a + chunk])[:, None]
+        p[a:a + chunk] = ((bp >= obs - 1e-9).sum(axis=1) + 1) / (perms.shape[0] + 1)
+        q = np.quantile(bp, 1 - local_alpha, axis=1, method="higher")[:, None]
+        flat = bp.max(axis=1, keepdims=True) <= 1e-9
+        field += ((bp >= q - 1e-9) & ~flat).sum(axis=0)
+    return b, p, field
+
+
+# ----------------------------------------------------------------------------
+# Data
+# ----------------------------------------------------------------------------
+
+
+def zone_of(lat: np.ndarray) -> np.ndarray:
+    out = np.empty(len(lat), dtype=object)
+    for name, lo, hi in ZONES:
+        out[(lat >= lo) & (lat < hi)] = name
+    return out
+
+
+def load_matrix(yearly_path, years):
+    y = pd.read_parquet(yearly_path, columns=["ID", "lon", "lat", "region", "year", *VARIABLES])
+    y = y[y["year"].isin(years)]
+    pts = y.drop_duplicates("ID")[["ID", "lon", "lat", "region"]].sort_values("ID").reset_index(drop=True)
+    pts["zone"] = zone_of(pts["lat"].to_numpy())
+    pts["unit"] = pts["region"].map(REGION_SHORT) + " · " + pts["zone"]
+    r = pd.Index(pts["ID"]).get_indexer(y["ID"])
+    c = pd.Index(list(years)).get_indexer(y["year"])
+    mats = {}
+    for v in VARIABLES:
+        m = np.full((len(pts), len(years)), np.nan)
+        m[r, c] = y[v].to_numpy(dtype=np.float64)
+        if np.isnan(m).any():
+            raise ValueError(f"missing point-years for {v}")
+        mats[v] = m
+    return pts, mats
+
+
+# ----------------------------------------------------------------------------
+# Figures
+# ----------------------------------------------------------------------------
+
+
+def plot_slope_maps(pts, maps, grid, *, title, out_path, gadm_peru_gpkg=None):
+    import matplotlib.pyplot as plt
+
+    from viz_palette import diverging_classes
+
+    classes = diverging_classes(np.concatenate([m["slope_sd"] for m in maps.values()]), n_per_arm=4)
+    cmap, norm = classes.cmap_norm()
+    adm0 = adm1 = None
+    if gadm_peru_gpkg is not None:
+        try:
+            from animation_all_lands import load_gadm_peru
+
+            adm0, adm1 = load_gadm_peru(gadm_peru_gpkg)
+        except Exception as e:
+            print(f"[el_nino_icen] no GADM: {e}")
+
+    t = grid["transform"]
+    extent = [t.c, t.c + grid["ncols"] * t.a, t.f + grid["nrows"] * t.e, t.f]
+    pos = pd.Index(grid["ids"]).get_indexer(pts["ID"])
+    yy, xx = grid["y_idx"][pos], grid["x_idx"][pos]
+    fig, axes = plt.subplots(1, len(maps), figsize=(5.0 * len(maps), 7.2))
+    im = None
+    for ax, (v, m) in zip(np.atleast_1d(axes), maps.items()):
+        img = np.full((grid["nrows"], grid["ncols"]), np.nan)
+        img[yy, xx] = m["slope_sd"]
+        im = ax.imshow(np.ma.masked_invalid(img), extent=extent, origin="upper", cmap=cmap, norm=norm,
+                       interpolation="nearest")
+        # stippling: 10x10-pixel blocks where most points have local p < 0.05
+        blk = pd.DataFrame({"by": yy // 10, "bx": xx // 10, "s": m["p"] < 0.05}).groupby(["by", "bx"])["s"].mean()
+        blk = blk[blk >= 0.5]
+        ax.scatter(t.c + (blk.index.get_level_values(1) * 10 + 5) * t.a,
+                   t.f + (blk.index.get_level_values(0) * 10 + 5) * t.e, s=0.7, c="#0b0b0b", linewidths=0)
+        if adm1 is not None:
+            adm1.boundary.plot(ax=ax, edgecolor="0.6", linewidth=0.3)
+            adm0.boundary.plot(ax=ax, edgecolor="black", linewidth=0.6)
+        for lat in (-9, -15):
+            ax.axhline(lat, color="0.35", lw=0.6, ls=(0, (4, 3)))
+        ax.set_xlim(-81.3, -68.5)
+        ax.set_ylim(-18.5, -3.3)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(VARIABLES[v][0], fontsize=13, fontweight="bold")
+        fp = m["field_p"]
+        ax.text(0.02, 0.02,
+                f"p < 0.05 local: {100 * m['share_local']:.1f} % de puntos\n"
+                f"(esperable sin relación: ~{100 * m['null_share']:.0f} %)\n"
+                f"significancia de campo: p = {fp:.3f}" if fp >= 0.001 else
+                f"p < 0.05 local: {100 * m['share_local']:.1f} % de puntos\n"
+                f"(esperable sin relación: ~{100 * m['null_share']:.0f} %)\n"
+                f"significancia de campo: p < 0.001",
+                transform=ax.transAxes, fontsize=9, va="bottom")
+    import textwrap
+
+    fig.suptitle("\n".join(textwrap.wrap(title, 95)), fontsize=12)
+    cax = fig.add_axes([0.2, 0.08, 0.6, 0.025])
+    classes.colorbar(fig, im, cax, label="Cambio por +1 de ICEN medio de la campaña (desviaciones estándar de la variable)")
+    fig.text(0.5, 0.01, "Puntos negros: p < 0.05 local. Permutación por bloques de 2 años (5000); significancia de campo "
+             "según Livezey y Chen (1983). Líneas discontinuas: −9° y −15°.", ha="center", fontsize=8)
+    fig.subplots_adjust(left=0.01, right=0.99, top=0.88, bottom=0.17, wspace=0.03)
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=170)
+    plt.close(fig)
+
+
+def plot_scatter(table, summary, *, title, out_path):
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    from viz_palette import BLUE, RED
+
+    cat_color = {
+        "fría": BLUE[400], "neutra": "#c3c2b7", "cálida débil": RED[200], "cálida moderada": RED[350],
+        "cálida fuerte": RED[500], "cálida extraordinaria": RED[700],
+    }
+    units = [(r, z) for r in REGION_ORDER for z, _, _ in ZONES]
+    vars_ = [VARIABLES[v][0] for v in VARIABLES]
+    fig, axes = plt.subplots(len(vars_), len(units), figsize=(2.35 * len(units), 2.6 * len(vars_) + 1.4),
+                             sharex="col", sharey="row", squeeze=False)
+    for i, var in enumerate(vars_):
+        unit_label = dict((VARIABLES[k][0], VARIABLES[k][1]) for k in VARIABLES)[var]
+        col = "anomaly" if unit_label == "aplicaciones" else "anomaly_pct"
+        for j, (region, zone) in enumerate(units):
+            ax = axes[i, j]
+            unit = f"{REGION_SHORT[region]} · {zone}"
+            d = table[(table["unit"] == unit) & (table["variable"] == var)]
+            ax.axhline(0, color="#e1e0d9", lw=0.8, zorder=0)
+            ax.axvline(0.5, color="#e1e0d9", lw=0.8, ls=(0, (3, 2)), zorder=0)
+            ax.scatter(d["icen_season"], d[col], s=16, c=d["category"].map(cat_color),
+                       edgecolors="white", linewidths=0.6, zorder=3)
+            s = summary["regional"][var][unit]
+            xs = np.linspace(d["icen_season"].min(), d["icen_season"].max(), 2)
+            slope = s["slope"] if col == "anomaly" else s["slope_pct"]
+            ax.plot(xs, slope * (xs - d["icen_season"].mean()) + d[col].mean(), color="#52514e", lw=1.2, zorder=2)
+            for _, r in d[d["icen_season"] > 2.1].iterrows():
+                ax.annotate(r["season"], (r["icen_season"], r[col]), xytext=(3, 2), textcoords="offset points",
+                            fontsize=6.5, color="#52514e")
+            p = s["p_block"]
+            ax.text(0.03, 0.97, f"{slope:+.2f}{'' if col == 'anomaly' else ' %'} por +1\nr = {s['r']:.2f}, "
+                    f"p = {p:.3f}" if p >= 0.001 else f"{slope:+.2f}{'' if col == 'anomaly' else ' %'} por +1\n"
+                    f"r = {s['r']:.2f}, p < 0.001",
+                    transform=ax.transAxes, fontsize=7, va="top",
+                    fontweight="bold" if p < 0.05 else "normal")
+            for sp in ("top", "right"):
+                ax.spines[sp].set_visible(False)
+            lo, hi = d["icen_season"].min(), d["icen_season"].max()
+            ax.set_xlim(lo - 0.3, hi + 0.25 * (hi - lo) + 0.3)  # room for the year labels
+            ax.tick_params(labelsize=7)
+            if i == 0:
+                ax.set_title(f"{REGION_SHORT[region]} ({REGION_SEASON[region]})\n{zone}", fontsize=8.5)
+            if j == 0:
+                ax.set_ylabel(f"{var}: anomalía\n({unit_label})", fontsize=8.5)
+            if i == len(vars_) - 1:
+                ax.set_xlabel("ICEN medio de la campaña", fontsize=8)
+    handles = [Line2D([0], [0], marker="o", color="w", markerfacecolor=c, markersize=7, label=k)
+               for k, c in cat_color.items()]
+    fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.955), ncol=6, frameon=False, fontsize=8,
+               title="Condición durante la campaña (categorías ICEN, ENFEN 2024)", title_fontsize=8)
+    fig.suptitle(title, fontsize=11, y=0.995)
+    fig.text(0.01, 0.005, "Cada punto es una campaña 1981–2019; anomalía respecto a la media 1981–2019 de la unidad. "
+             "Línea: ajuste lineal. p: permutación por bloques de 2 años. En negrita: p < 0.05. "
+             "Etiquetas: campañas con ICEN medio > 2.1 (fuerte o extraordinaria).", fontsize=7)
+    fig.subplots_adjust(left=0.06, right=0.995, top=0.82, bottom=0.08, wspace=0.08, hspace=0.12)
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=170)
+    plt.close(fig)
+
+
+# ----------------------------------------------------------------------------
+# Runner
+# ----------------------------------------------------------------------------
+
+
+def run_el_nino_icen(
+    *,
+    results_root,
+    potato_grid_file,
+    icen_file,
+    variety: str,
+    variety_label: str,
+    years=range(1981, 2020),
+    n_perm: int = 5000,
+    gadm_peru_gpkg=None,
+) -> dict:
+    from load_variables import _raster_grid
+
+    years = list(years)
+    out_dir = Path(os.fspath(results_root)) / "el_nino_icen"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    icen = load_icen(icen_file)
+    x_by_region = season_icen(icen, years)
+    pts, mats = load_matrix(Path(os.fspath(results_root)) / "yearly_aggregated_data.parquet", years)
+    perms = block_permutations(len(years), n_perm)
+
+    maps, rows = {}, []
+    summary = {"years": [years[0], years[-1]], "n_perm": n_perm, "block_years": 2,
+               "field": {}, "regional": {}}
+    for v, (label, _, sd_floor) in VARIABLES.items():
+        y = mats[v]
+        b = np.zeros(len(pts))
+        p = np.ones(len(pts))
+        field = np.zeros(n_perm)
+        for region in SEASON_MONTHS:
+            idx = np.flatnonzero(pts["region"].to_numpy() == region)
+            br, pr, fr = slopes_with_permutation(y[idx], x_by_region[region].to_numpy(), perms)
+            b[idx], p[idx] = br, pr
+            field += fr
+        constant = y.std(axis=1) == 0
+        p[constant] = 1.0
+        sd = np.maximum(y.std(axis=1, ddof=1), sd_floor)
+        share = float(np.mean(p < 0.05))
+        null_share = field / len(pts)
+        maps[v] = {"slope_sd": b / sd, "p": p, "share_local": share,
+                   "null_share": float(np.median(null_share)),
+                   "field_p": float(np.mean(null_share >= share - 1e-12))}
+        summary["field"][label] = {k: maps[v][k] for k in ("share_local", "null_share", "field_p")}
+
+        # regional series
+        summary["regional"][label] = {}
+        for unit, g in pts.groupby("unit", sort=False):
+            region = g["region"].iloc[0]
+            series = y[g.index.to_numpy()].mean(axis=0)
+            mean = series.mean()
+            xr = x_by_region[region].to_numpy()
+            bu, pu, _ = slopes_with_permutation(series[None, :], xr, perms)
+            r = float(np.corrcoef(xr, series)[0, 1]) if series.std() > 0 else 0.0
+            summary["regional"][label][unit] = {
+                "slope": float(bu[0]), "slope_pct": float(100 * bu[0] / mean) if mean else None,
+                "r": r, "p_block": float(pu[0]), "n_points": int(len(g)), "mean": float(mean),
+            }
+            for k, yr in enumerate(years):
+                rows.append({
+                    "variety": variety, "variable": label, "unit": unit, "region": region,
+                    "zone": g["zone"].iloc[0], "year": yr, "season": season_label(region, yr),
+                    "icen_season": xr[k], "category": category(xr[k]), "unit_mean": series[k],
+                    "anomaly": series[k] - mean, "anomaly_pct": 100 * (series[k] - mean) / mean if mean else np.nan,
+                    "n_points": len(g),
+                })
+        print(f"[el_nino_icen] {variety} {label}: local p<0.05 {100 * share:.1f}% "
+              f"(null ~{100 * maps[v]['null_share']:.1f}%), field p = {maps[v]['field_p']:.4f}")
+
+    table = pd.DataFrame(rows)
+    csv_path = out_dir / f"icen_regional_{variety}.csv"
+    table.round(5).to_csv(csv_path, index=False)
+    with open(out_dir / f"icen_summary_{variety}.json", "w") as fh:
+        json.dump(summary, fh, indent=2, ensure_ascii=False)
+
+    grid = _raster_grid(os.fspath(potato_grid_file))
+    plot_slope_maps(pts, maps, grid,
+                    title=f"Respuesta a El Niño costero durante la campaña, variedad {variety_label}: "
+                          f"pendiente de cada variable frente al ICEN medio de su campaña ({years[0]}–{years[-1]})",
+                    out_path=out_dir / f"icen_slope_maps_{variety}.png", gadm_peru_gpkg=gadm_peru_gpkg)
+    plot_scatter(table, summary,
+                 title=f"ICEN medio de cada campaña frente a la anomalía regional, variedad {variety_label}",
+                 out_path=out_dir / f"icen_scatter_regions_{variety}.png")
+    return {"dir": os.fspath(out_dir), "csv": os.fspath(csv_path)}

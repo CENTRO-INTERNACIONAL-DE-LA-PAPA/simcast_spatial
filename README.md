@@ -308,29 +308,24 @@ to one region). Colours are discrete classes shared by all frames (see
 
 Optional: boundary overlay via GADM (`animation_all_lands.load_gadm_peru`). A URL is downloaded once to `~/.cache/simcast_spatial/` and reused by every map; if you can’t access the URL, download the `.gpkg` and point to the local path. Years without any BU raster (e.g. 2020, which has no `prec`) are skipped.
 
-### Step 6 — El Niño years vs. the non-Niño average (for a scientific audience)
+### Step 6 — Response to El Niño Costero, season by season
 
-`uv run python main.py --steps elnino --vt r s` (`el_nino_regional.py`) writes to
-`<results_root>/el_nino_regional/`:
+`uv run python main.py --steps elnino --vt r s` (`el_nino_icen.py`) writes to
+`<results_root>/el_nino_icen/`:
 
 | file | content |
 |---|---|
-| `composites_el_nino_<variety>.png` | rows APP / BU / FU, columns *extraordinario* and *fuerte + moderado*: mean standardised anomaly per point, stippled where local p < 0.05, with the share of significant points, its chance level and the field significance in each panel |
-| `regional_dotbox_el_nino_<variety>.png` | per unit (SIMCAST region × Norte/Centro/Sur): box = the 21 non-Niño years, dots = El Niño years coloured by magnitude; years outside the reference range are labelled |
-| `regional_el_nino_<variety>.csv` | one row per unit × variable × year: mean anomaly (units and %), `z_region`, percentile and p against the reference years, Jensen-Shannon (bits), Wasserstein (variable units), zero shares (BU) and their percentiles |
-| `point_composites_<variety>.parquet` | per point: composite z, Δ, permutation p, local and FDR significance |
-| `composite_{z,sig}_<VAR>_<group>_<variety>.tif` | the composites as GeoTIFFs for GIS |
-| `metadata_<variety>.json` | reference years, groups, field-significance results |
+| `icen_slope_maps_<variety>.png` | APP, BU, FU: slope per point against the season-mean ICEN (SD of the variable per +1 ICEN), stippled where local p < 0.05, with the field significance in each panel |
+| `icen_scatter_regions_<variety>.png` | per unit (SIMCAST region × Norte/Centro/Sur) and variable: season ICEN vs. unit anomaly, one dot per season coloured by ICEN category, fitted line, slope, r, p |
+| `icen_regional_<variety>.csv` | the data behind the scatter plots |
+| `icen_summary_<variety>.json` | regional slopes, r, p and the field-significance results |
 
 Method:
 
-- **Years.** Official El Niño Costero events (ENFEN 2024, `reference/el_nino_costero_enfen2024.csv`). A SIMCAST year is an El Niño year when an event covers ≥ 3 months of one of its seasons. Groups: *extraordinario* (1982, 1983, 1997, 1998) and *fuerte + moderado* (1986, 1987, 1991, 1992, 2015, 2016). Reference: the 21 years with no event at all; weak-event years are left out of both. 2020 is excluded.
-- **Units.** SIMCAST region (one season each) × latitude zone: Norte ≥ −9°, Centro −15° to −9°, Sur < −15°. Each unit has 9 000 to 143 000 points.
-- **Per point.** z = (year − reference mean) / reference SD, with the SD floored at 0.5. Composite = mean z of the group. Two-sided permutation test of the group vs. reference means, enumerating all relabellings when there are ≤ 20 000 (4 of 25 years), else 20 000 random ones.
-- **Field significance.** Livezey & Chen (1983): the same relabelling is applied to the whole map, keeping spatial correlation, and the share of locally significant points is compared with its distribution under relabelling. A point-wise Benjamini–Hochberg FDR mask (α = 0.10, Wilks 2016) is stored too; with 4–6 El Niño years it rejects almost nothing.
-- **Per unit.** Each reference year is compared with the other 20 (leave-one-out), which gives the natural spread used for `z_region`, the percentiles and p.
-
-The earlier national KL analysis (`el_nino_analysis.py`, outputs moved to `el_nino_kl_legacy/`) is kept only for reference; its event classification is reused.
+- **El Niño per season.** Each point has one season per year, fixed by its region: Sierra Media Apr–Jul, Costa y Valle Interandino Jul–Dec, Sierra Alta Nov–Apr. El Niño is measured as the mean of the official monthly ICEN (ENFEN 2024, `reference/icen_enfen2024.txt`) over that season's months. So Sierra Alta Nov 1998–Apr 1999 (ICEN −0.37) counts as neutral although 1998 belongs to the 1997–98 event.
+- **Regression.** The season value is regressed on the season ICEN over all 39 seasons 1981–2019 (El Niño, La Niña and neutral), per point and per unit.
+- **Significance.** The ICEN series is permuted among years in blocks of two consecutive years (5000 permutations), so a two-year event moves as one piece. The same permutation is applied to every point, which gives the field significance (Livezey & Chen 1983).
+- **Exclusions.** 2020 is excluded because it has no Sierra Alta season.
 
 ## Colour scales (all maps, animations and figures)
 

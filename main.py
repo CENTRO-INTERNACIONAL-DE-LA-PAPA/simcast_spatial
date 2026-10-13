@@ -32,7 +32,7 @@ STEP_ORDER = [
     "trend",  # OLS trend stats + yearly table (with lon/lat/altitude)
     "maps",  # trend significance / coefficient PNGs
     "animations",  # APP, BU, FU "all lands" GIF + MP4
-    "elnino",  # El Niño composites + significance, regional anomalies, JS/Wasserstein
+    "elnino",  # response to the season-mean ICEN: slope maps + regional scatter
 ]
 
 VT_NAMES = {"s": "susceptible", "ms": "moderately susceptible", "mr": "moderately resistant",
@@ -213,14 +213,14 @@ def run(steps, varieties, *, start_year=1981, end_year=2020, animation_vars=("AP
         if "elnino" in steps:
             from pathlib import Path
 
-            from el_nino_regional import run_el_nino_regional
+            from el_nino_icen import run_el_nino_icen
 
-            run_el_nino_regional(
+            run_el_nino_icen(
                 results_root=results_root,
                 potato_grid_file=vpaths.potato_grid_file,
+                icen_file=Path(__file__).parent / "reference" / "icen_enfen2024.txt",
                 variety=label.replace(" ", "_"),
                 variety_label={"resistant": "resistente", "susceptible": "susceptible"}.get(label, label),
-                events_csv=Path(__file__).parent / "reference" / "el_nino_costero_enfen2024.csv",
                 years=range(start_year, min(end_year, 2019) + 1),  # 2020 lacks Sierra Alta
                 gadm_peru_gpkg=vpaths.gadm_peru_gpkg,
             )
