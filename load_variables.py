@@ -14,6 +14,7 @@ import rasterio
 from dask.distributed import Client, as_completed, progress
 from rasterio.transform import from_origin
 
+from point_attrs import add_point_columns, point_attributes
 from simcast import calculate_hhr, simcast_model
 
 DEFAULT_VARIABLES = ["prec", "tmax", "tmin", "td"]
@@ -294,6 +295,7 @@ def parallel_simcast_pipeline(
         valid_pairs = default_valid_pairs()
 
     region_points = {name: points_table(gdf) for name, gdf in regions.items()}
+    attrs = point_attributes(potato_grid)  # lon, lat, altitude written with the results
 
     futures_map: dict = {}
     n_chunks: dict[tuple, int] = {}
@@ -369,6 +371,7 @@ def parallel_simcast_pipeline(
                 write_tiff=write_tiff,
                 requested_range=season,
                 n_points=len(region_points[region]),
+                point_attrs=attrs,
             )
             del df_all
 
@@ -453,7 +456,14 @@ def save_results(
     write_tiff: bool = False,
     requested_range: tuple[str, str] | None = None,
     n_points: int | None = None,
+    point_attrs: pd.DataFrame | None = None,
 ):
+    """
+    Write ``simcast_results.parquet`` (+ ``coverage.json`` and optional APP tif).
+
+    With ``point_attrs`` (see ``point_attrs.point_attributes``) the parquet also
+    carries ``lon``, ``lat`` and ``altitude`` right after ``ID``.
+    """
     out_dir = results_path(results_root, year, period, region)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -463,6 +473,8 @@ def save_results(
         return
 
     df = df.sort_values(["ID", "date"], kind="stable").reset_index(drop=True)
+    if point_attrs is not None:
+        df = add_point_columns(df, point_attrs)
     df.to_parquet(out_dir / "simcast_results.parquet")
     _write_coverage(out_dir, df, requested_range, n_points)
 

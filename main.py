@@ -28,6 +28,7 @@ STEP_ORDER = [
     "simcast",  # SIMCAST per season -> simcast_results.parquet + APP tif
     "rasters",  # BU/FU season-sum GeoTIFFs
     "merge",  # one GeoTIFF per year and variable (all regions) for ArcGIS
+    "points",  # add lon/lat/altitude to existing simcast_results.parquet files
     "trend",  # OLS trend stats + yearly table (with lon/lat/altitude)
     "maps",  # trend significance / coefficient PNGs
     "animations",  # APP, BU, FU "all lands" GIF + MP4
@@ -148,6 +149,11 @@ def run(steps, varieties, *, start_year=1981, end_year=2020, animation_vars=("AP
                 variety=VT_NAMES.get(vt, vt).replace(" ", "_"),
                 overwrite=True,  # cheap (~10 s); keeps merged files in sync
             )
+
+        if "points" in steps:
+            from point_attrs import backfill_results
+
+            backfill_results(results_root, vpaths.potato_grid_file, workers=6)
 
         stats_parquet_path = results_root / "statistical_trends_all.parquet"
         yearly_parquet_path = results_root / "yearly_aggregated_data.parquet"

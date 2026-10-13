@@ -118,7 +118,7 @@ uv run python main.py --steps simcast rasters merge trend maps animations --vt r
 ```
 
 Steps: `prepare`, `resampling`, `masking` (legacy), `simcast`, `rasters`,
-`merge`, `trend`, `maps`, `animations`. `--vt` takes the resistance classes
+`merge`, `points`, `trend`, `maps`, `animations`. `--vt` takes the resistance classes
 (`s`, `ms`, `mr`, `r`, `hr`); each one writes to `config.RESULTS_ROOTS[vt]`
 (`results_resistant_v3`, `results_susceptible_v3`).
 
@@ -143,6 +143,10 @@ Uses `load_variables.parallel_simcast_pipeline(...)` to write:
 
 - `simcast_results.parquet` per `(year, cultivo, region)` (sorted by `ID, date`)
 - `coverage.json` per season (requested vs. actual date range, number of IDs)
+- every result table (`simcast_results.parquet`, `yearly_aggregated_data.parquet`,
+  `statistical_trends_all.parquet`) carries `lon`, `lat` and `altitude` (m a.s.l.,
+  column `Alt` of the potato grid) right after `ID` (`point_attrs.py`). Older
+  result trees can be updated in place with `main.py --steps points --vt r s`.
 - optionally `simcast_<year>_<period>_<region>.tif` (APP raster)
 
 Tune:

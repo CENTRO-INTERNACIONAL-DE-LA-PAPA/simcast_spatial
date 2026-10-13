@@ -358,7 +358,10 @@ def compute_trend_stats(
         yearly_out.to_parquet(output_yearly_data_path, index=False)
         del yearly_out
 
-    stats_df = pd.DataFrame({"ID": potato_grid["ID"].to_numpy()})
+    from point_attrs import point_attributes
+
+    # one row per potato point, with its coordinates and altitude
+    stats_df = point_attributes(potato_grid)
 
     for metric in METRICS:
         st = ols_trend_by_id(yearly, metric, min_years=min_years, year_range=year_range)
