@@ -25,17 +25,17 @@ DEFAULT_ALPHA = 0.65
 ANIMATION_VARIABLES = {
     "APP": {
         "raster_glob": "simcast_*.tif",
-        "label": "Fungicide applications per season (APP)",
+        "label": "Aplicaciones de fungicida por campaña (APP)",
         "stem": "lateblight_all_lands_app",
     },
     "BU": {
         "raster_glob": "BU_sum_*.tif",
-        "label": "Blight Units, season sum (BU)",
+        "label": "Blight Units, suma por campaña (BU)",
         "stem": "lateblight_all_lands_bu",
     },
     "FU": {
         "raster_glob": "FU_sum_*.tif",
-        "label": "Fungicide Units, season sum (FU)",
+        "label": "Fungicide Units, suma por campaña (FU)",
         "stem": "lateblight_all_lands_fu",
     },
 }
@@ -335,6 +335,7 @@ def create_all_lands_animation(
     colorbar_label: str = "Blight Units",
     title_prefix: str = "SIMCAST Results",
     colorbar_extend: str = "neither",
+    classes=None,
 ):
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
@@ -344,17 +345,29 @@ def create_all_lands_animation(
         gadm_admin1 = gadm_admin1.to_crs(ref_crs)
 
     fig, ax = plt.subplots(figsize=(12, 8))
-    fig.subplots_adjust(bottom=0.1)
+    fig.subplots_adjust(bottom=0.16 if classes is not None else 0.1)
 
-    im = ax.imshow(
-        np.ma.masked_all(all_data[0].shape),
-        extent=extent,
-        origin="upper",
-        cmap=cmap,
-        alpha=alpha,
-        vmin=vmin,
-        vmax=vmax,
-    )
+    if classes is not None:
+        # discrete classes: one colour per class, opaque so steps stay distinct
+        cmap_c, norm_c = classes.cmap_norm()
+        im = ax.imshow(
+            np.ma.masked_all(all_data[0].shape),
+            extent=extent,
+            origin="upper",
+            cmap=cmap_c,
+            norm=norm_c,
+            interpolation="nearest",
+        )
+    else:
+        im = ax.imshow(
+            np.ma.masked_all(all_data[0].shape),
+            extent=extent,
+            origin="upper",
+            cmap=cmap,
+            alpha=alpha,
+            vmin=vmin,
+            vmax=vmax,
+        )
 
     if gadm_admin0 is not None:
         gadm_admin0.boundary.plot(ax=ax, edgecolor="black", linewidth=1.2, zorder=10)
@@ -363,12 +376,16 @@ def create_all_lands_animation(
 
     title = ax.text(0.5, 1.05, "", transform=ax.transAxes, ha="center", fontsize=14)
 
-    cbar = fig.colorbar(im, extend=colorbar_extend)
-    cbar.set_label(colorbar_label, labelpad=2)
+    if classes is not None:
+        cax = fig.add_axes([0.25, 0.05, 0.5, 0.03])
+        classes.colorbar(fig, im, cax, label=colorbar_label)
+    else:
+        cbar = fig.colorbar(im, extend=colorbar_extend)
+        cbar.set_label(colorbar_label, labelpad=2)
 
-    ax.set_xlabel("Longitude")
-    ax.set_ylabel("Latitude")
-    ax.grid(True, ls="--", alpha=0.4)
+    ax.set_xlabel("Longitud")
+    ax.set_ylabel("Latitud")
+    ax.grid(True, ls="--", alpha=0.3)
 
     def init():
         im.set_data(np.ma.masked_all(all_data[0].shape))
@@ -377,7 +394,7 @@ def create_all_lands_animation(
 
     def update(frame):
         im.set_data(all_data[frame])
-        title.set_text(f"{title_prefix} – Year: {years[frame]}")
+        title.set_text(f"{title_prefix} – Año {years[frame]}")
         return [im, title]
 
     anim = FuncAnimation(
@@ -418,6 +435,8 @@ def make_all_lands_animation(
     fps: int = 3,
     gif: bool = True,
     mp4: bool = True,
+    classed: bool = True,
+    n_classes: int = 6,
 ) -> dict[str, str]:
     """
     Build the yearly "all lands" animation for one variable (APP, BU or FU).
@@ -428,6 +447,11 @@ def make_all_lands_animation(
     ``results_root``).  ``vmax_percentile`` caps the colour scale at that
     percentile of all frames so a few extreme pixels do not wash out the map
     (the colourbar then shows an arrow); ``None`` uses the true maximum.
+
+    By default (``classed=True``) the colours are ``n_classes`` discrete
+    classes of one hue (``viz_palette.sequential_classes``), the same for all
+    frames; the eye reads discrete steps, not a continuous ramp.
+    ``vmax_percentile`` then only applies with ``classed=False``.
     """
     spec = ANIMATION_VARIABLES[variable.upper()]
     results_root = Path(os.fspath(results_root))
@@ -443,7 +467,13 @@ def make_all_lands_animation(
     years = sorted(paths_by_year)
     all_data, extent, ref_crs, vmin, vmax, _ = build_all_lands_data(paths_by_year)
     extend = "neither"
-    if vmax_percentile is not None:
+    classes = None
+    if classed:
+        from viz_palette import sequential_classes
+
+        # same classes for every frame, so a colour means the same in every year
+        classes = sequential_classes(np.ma.stack(all_data).compressed(), n_classes=n_classes)
+    elif vmax_percentile is not None:
         vals = np.ma.stack(all_data).compressed()
         if vals.size:
             capped = float(np.percentile(vals, vmax_percentile))
@@ -471,6 +501,7 @@ def make_all_lands_animation(
         colorbar_label=spec["label"],
         title_prefix=title_prefix or f"SIMCAST {variable.upper()}",
         colorbar_extend=extend,
+        classes=classes,
     )
     out = {}
     gif_path = out_dir / f"{spec['stem']}.gif" if gif else None

@@ -381,6 +381,13 @@ def compute_trend_stats(
 # ----------------------------------------------------------------------------
 
 
+_VAR_ES = {
+    "app": ("APP", "aplicaciones de fungicida por campaña"),
+    "abu": ("BU", "blight units acumuladas por campaña"),
+    "afu": ("FU", "fungicide units acumuladas por campaña"),
+}
+
+
 def _load_trend_gdf(shapefile_path, stats_parquet_path, variable_prefix):
     p_value_col = f"p_value_{variable_prefix}"
     slope_col = f"slope_{variable_prefix}"
@@ -447,31 +454,39 @@ def create_significance_map(
     print(f"[trend] {variable_prefix}: increase={counts.get(2, 0)}, decrease={counts.get(3, 0)}, "
           f"not significant={counts.get(1, 0)}, no data={counts.get(0, 0)}")
 
+    from viz_palette import DECREASE, INCREASE, NOT_SIGNIFICANT
+
+    short, long_name = _VAR_ES.get(variable_prefix, (variable_prefix.upper(), ""))
     fig, ax = plt.subplots(1, 1, figsize=figsize)
+    # red = more, blue = less (same poles as every diverging map), grey = no trend
     colors = {
-        2: "#D94535",  # Increase
-        3: "#009B77",  # Decrease
-        1: "#E6E7E8",  # Not significant
-        0: "#FFFFFF00",  # Transparent
+        2: INCREASE,
+        3: DECREASE,
+        1: NOT_SIGNIFICANT,
+        0: "#FFFFFF00",  # no data: transparent
     }
     trend_gdf["color"] = trend_gdf["trend_type"].map(colors)
     trend_gdf.plot(color=trend_gdf["color"], ax=ax, markersize=markersize)
     _plot_admin0(ax, gadm_peru_gpkg, trend_gdf.crs)
 
+    n_valid = max(int((trend_gdf["trend_type"] > 0).sum()), 1)
     legend_elements = [
-        Line2D([0], [0], marker="o", color="w", label=label, markerfacecolor=colors[k], markersize=10)
-        for k, label in ((2, "Significant Increase"), (3, "Significant Decrease"), (1, "No Significant Trend"))
+        Line2D([0], [0], marker="o", color="w", markerfacecolor=colors[k], markersize=10,
+               label=f"{label} ({100 * counts.get(k, 0) / n_valid:.0f} %)")
+        for k, label in ((2, "Aumento significativo"), (3, "Disminución significativa"),
+                         (1, "Sin tendencia significativa"))
     ]
     ax.legend(
         handles=legend_elements,
-        loc="lower right",
-        title=f"{variable_prefix.upper()} Trend (p < {p_threshold})",
+        loc="lower left",
+        title=f"Tendencia de {short} (p < {p_threshold})",
         fontsize=12,
+        frameon=False,
     )
-    ax.set_title(f"Significance of {variable_prefix.upper()} Trends", fontsize=16, pad=20)
-    ax.set_xlabel("Longitude")
-    ax.set_ylabel("Latitude")
-    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.set_title(f"Tendencia de {short} ({long_name}), 1981–2020", fontsize=16, pad=20)
+    ax.set_xlabel("Longitud")
+    ax.set_ylabel("Latitud")
+    ax.grid(True, linestyle="--", alpha=0.3)
     fig.tight_layout()
 
     Path(output_image_path).parent.mkdir(parents=True, exist_ok=True)
@@ -505,48 +520,40 @@ def create_coefficient_map(
     significant_gdf = trend_gdf[significant_mask]
     nonsignificant_gdf = trend_gdf[~significant_mask]
 
-    pantone_green = "#009B77"
-    pantone_red = "#D94535"
-    neutral_color = "#F5F5F5"
-    custom_cmap = mcolors.LinearSegmentedColormap.from_list(
-        "GreenRedDiverging", [pantone_green, neutral_color, pantone_red]
-    )
+    from matplotlib.cm import ScalarMappable
 
+    from viz_palette import NOT_SIGNIFICANT, diverging_classes
+
+    short, long_name = _VAR_ES.get(variable_prefix, (variable_prefix.upper(), ""))
     fig, ax = plt.subplots(1, 1, figsize=figsize)
-    nonsignificant_gdf.plot(ax=ax, color="#E6E7E8", markersize=markersize)
+    nonsignificant_gdf.plot(ax=ax, color=NOT_SIGNIFICANT, markersize=markersize)
 
     if not significant_gdf.empty:
-        max_abs_slope = significant_gdf[slope_col].abs().max()
-        significant_gdf.plot(
-            ax=ax,
-            column=slope_col,
-            cmap=custom_cmap,
-            markersize=markersize,
-            vmin=-max_abs_slope,
-            vmax=max_abs_slope,
-            legend=True,
-            legend_kwds={
-                "label": f"{variable_prefix.upper()} Trend Coefficient",
-                "orientation": "horizontal",
-                "pad": 0.01,
-            },
-        )
+        # slope per decade reads better than per year; discrete diverging classes
+        per_decade = significant_gdf[slope_col].to_numpy() * 10.0
+        classes = diverging_classes(per_decade)
+        cmap, norm = classes.cmap_norm()
+        colors = cmap(norm(per_decade))
+        significant_gdf.plot(ax=ax, color=colors, markersize=markersize)
+        cax = fig.add_axes([0.2, 0.06, 0.6, 0.018])
+        classes.colorbar(fig, ScalarMappable(norm=norm, cmap=cmap), cax,
+                         label=f"Cambio de {short} por década (solo puntos con p < {p_threshold})")
     else:
         print(f"No significant points found for {variable_prefix.upper()} at p < {p_threshold}")
 
     _plot_admin0(ax, gadm_peru_gpkg, trend_gdf.crs)
 
     legend_elements = [
-        Line2D([0], [0], marker="o", color="w", label="No Significant Trend",
-               markerfacecolor="#E6E7E8", markersize=10)
+        Line2D([0], [0], marker="o", color="w", label="Sin tendencia significativa",
+               markerfacecolor=NOT_SIGNIFICANT, markersize=10)
     ]
-    ax.legend(handles=legend_elements, loc="lower right")
-    ax.set_title(f"Magnitude of {variable_prefix.upper()} Trends (p < {p_threshold})", fontsize=16, pad=20)
-    ax.set_xlabel("Longitude")
-    ax.set_ylabel("Latitude")
-    ax.grid(True, linestyle="--", alpha=0.5)
-    fig.tight_layout()
-
+    ax.legend(handles=legend_elements, loc="lower left", frameon=False, fontsize=12)
+    ax.set_title(f"Magnitud de la tendencia de {short} ({long_name}), 1981–2020",
+                 fontsize=16, pad=20)
+    ax.set_xlabel("Longitud")
+    ax.set_ylabel("Latitud")
+    ax.grid(True, linestyle="--", alpha=0.3)
+    fig.subplots_adjust(bottom=0.12)
     Path(output_image_path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_image_path, dpi=300, bbox_inches="tight")
     plt.close(fig)

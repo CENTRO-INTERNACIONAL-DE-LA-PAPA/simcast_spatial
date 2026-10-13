@@ -301,9 +301,8 @@ writes one GIF and one MP4 per variable into the results root:
 | `FU` | `FU_sum_*.tif` | `lateblight_all_lands_fu.{gif,mp4}` |
 
 Each frame is one year, adding the three cultivo rasters (every point belongs
-to one region). The colour scale is capped at the 99th percentile of all frames
-(`vmax_percentile`, the colourbar shows an arrow) so a few extreme pixels do not
-wash out the map; pass `None` for the true maximum. The lower-level helpers
+to one region). Colours are discrete classes shared by all frames (see
+"Colour scales" below); `classed=False` restores the old continuous scale. The lower-level helpers
 (`collect_paths_by_year`, `build_all_lands_data`, `create_all_lands_animation`,
 `save_all_lands_animation`) are unchanged.
 
@@ -336,6 +335,25 @@ KL is `KL(P_year || Q_ref)` in nats between histograms of APP over the same
 302 449 points (`Q_ref` pools all non-Niño years; add-one smoothing). Each
 non-Niño year is also compared with the other non-Niño years (leave-one-out),
 which gives the natural year-to-year KL range shown in the figure title.
+
+## Colour scales (all maps, animations and figures)
+
+The eye reads a continuous colour ramp as a handful of steps, not as a number,
+so every map uses **discrete classes** with round, labelled breaks
+(`viz_palette.py`):
+
+| What is shown | Scale |
+|---|---|
+| A magnitude (APP, BU, FU, non-Niño mean) | one hue, light → dark blue, ~6 classes; first and last classes open-ended; a class of its own for exact zeros when they are ≥ 10 % of the map (BU) |
+| A change (El Niño anomaly, trend per decade) | blue (less) ↔ grey (about zero) ↔ red (more), 4 classes per arm |
+| Trend significance | red = significant increase, blue = significant decrease, light grey = no significant trend |
+
+Breaks are equal round steps between the 1st and 99th percentiles, or rounded
+quantiles when the variable is very skewed (median < 25 % of the 99th
+percentile, e.g. BU). One set of classes is used for all frames of an animation
+and all panels of a figure, so a colour means the same value everywhere. The red
+ramp is lightness-matched to the blue ramp in OKLCH, so both arms of a diverging
+scale weigh the same.
 
 ## Resource notes (CPU/RAM)
 

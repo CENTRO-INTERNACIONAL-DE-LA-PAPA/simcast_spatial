@@ -261,8 +261,6 @@ def plot_nino_maps(
     """
     import matplotlib.pyplot as plt
 
-    from matplotlib.colors import TwoSlopeNorm
-
     rank = MAGNITUDE_ORDER.index(min_magnitude)
     strong = table["magnitude"].map(lambda m: m in MAGNITUDE_ORDER and MAGNITUDE_ORDER.index(m) >= rank)
     nino = table[table["is_nino"] & strong].sort_values("year")
@@ -273,11 +271,15 @@ def plot_nino_maps(
         vals = stack.data[i] - ref_mean if anomaly else stack.data[i]
         panels.append((str(int(r["year"])), vals, r))
 
-    vmax = float(np.percentile(stack.data, 99))
+    from viz_palette import diverging_classes, sequential_classes
+
+    # discrete classes, identical for every panel of the figure
+    seq = sequential_classes(np.concatenate([stack.data.ravel(), np.ravel(ref_mean)]))
+    seq_cmap, seq_norm = seq.cmap_norm()
     if anomaly:
-        diffs = np.concatenate([np.abs(v) for _, v, r in panels if r is not None]) if len(panels) > 1 else np.array([1.0])
-        dmax = max(float(np.percentile(diffs, 99)), 0.5)
-        norm_anom = TwoSlopeNorm(vmin=-dmax, vcenter=0.0, vmax=dmax)
+        diffs = np.concatenate([v for _, v, r in panels if r is not None]) if len(panels) > 1 else np.array([1.0])
+        div = diverging_classes(diffs)
+        div_cmap, div_norm = div.cmap_norm()
     n = len(panels)
     ncols = min(n, ncols_max)
     nrows = int(np.ceil(n / ncols))
@@ -302,10 +304,10 @@ def plot_nino_maps(
         name, values, r = panels[k]
         if anomaly and r is not None:
             im_anom = ax.imshow(to_image(stack, values), extent=stack.extent, origin="upper",
-                                cmap="RdBu_r", norm=norm_anom, interpolation="nearest")
+                                cmap=div_cmap, norm=div_norm, interpolation="nearest")
         else:
             im = ax.imshow(to_image(stack, values), extent=stack.extent, origin="upper",
-                           cmap=cmap, vmin=0, vmax=vmax, interpolation="nearest")
+                           cmap=seq_cmap, norm=seq_norm, interpolation="nearest")
         if adm1 is not None:
             adm1.boundary.plot(ax=ax, edgecolor="0.55", linewidth=0.3)
             adm0.boundary.plot(ax=ax, edgecolor="black", linewidth=0.6)
@@ -328,17 +330,15 @@ def plot_nino_maps(
     )
     if im is not None and not anomaly:
         cax = fig.add_axes([0.3, 0.06, 0.4, 0.025])
-        cb = fig.colorbar(im, cax=cax, orientation="horizontal", extend="max")
-        cb.set_label(VARIABLES.get(variable, (None, None, variable))[2])
+        seq.colorbar(fig, im, cax, label=VARIABLES.get(variable, (None, None, variable))[2])
     if anomaly:
         if im is not None:
-            cax = fig.add_axes([0.02, 0.06, 0.12, 0.025])
-            cb = fig.colorbar(im, cax=cax, orientation="horizontal", extend="max")
-            cb.set_label(f"{variable} promedio sin Niño")
+            cax = fig.add_axes([0.02, 0.06, 0.16, 0.025])
+            seq.colorbar(fig, im, cax, label=f"{variable} promedio sin Niño")
         if im_anom is not None:
             cax = fig.add_axes([0.35, 0.06, 0.4, 0.025])
-            cb = fig.colorbar(im_anom, cax=cax, orientation="horizontal", extend="both")
-            cb.set_label(f"Año Niño − promedio sin Niño ({VARIABLES.get(variable, (None, variable))[1]} por campaña)")
+            div.colorbar(fig, im_anom, cax,
+                         label=f"Año Niño − promedio sin Niño ({VARIABLES.get(variable, (None, variable))[1]} por campaña)")
     fig.subplots_adjust(left=0.01, right=0.99, top=0.82, bottom=0.2, wspace=0.04, hspace=0.6)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=160)
