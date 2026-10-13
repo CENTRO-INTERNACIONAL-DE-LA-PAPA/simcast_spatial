@@ -308,33 +308,29 @@ to one region). Colours are discrete classes shared by all frames (see
 
 Optional: boundary overlay via GADM (`animation_all_lands.load_gadm_peru`). A URL is downloaded once to `~/.cache/simcast_spatial/` and reused by every map; if you can’t access the URL, download the `.gpkg` and point to the local path. Years without any BU raster (e.g. 2020, which has no `prec`) are skipped.
 
-### Step 6 — El Niño years vs. the non-Niño average (APP, BU, FU)
+### Step 6 — El Niño years vs. the non-Niño average (for a scientific audience)
 
-`uv run python main.py --steps elnino --vt r s` (`el_nino_analysis.py`) writes to
-`<results_root>/el_nino/`, for each variable `<var>` in `app`, `bu`, `fu`:
+`uv run python main.py --steps elnino --vt r s` (`el_nino_regional.py`) writes to
+`<results_root>/el_nino_regional/`:
 
-- `kl_<var>_el_nino_<variety>.csv`: one row per year (1981–2019) with the overlap of
-  El Niño with each season, `is_nino`, `magnitude`, KL divergence and mean value.
-- `<var>_el_nino_vs_promedio_<variety>.png`: the non-Niño mean map, then one map
-  per El Niño year (magnitude ≥ moderado) left to right, with magnitude and KL below.
-- `<var>_el_nino_anomalia_<variety>.png`: the same years as anomalies (year − mean).
+| file | content |
+|---|---|
+| `composites_el_nino_<variety>.png` | rows APP / BU / FU, columns *extraordinario* and *fuerte + moderado*: mean standardised anomaly per point, stippled where local p < 0.05, with the share of significant points, its chance level and the field significance in each panel |
+| `regional_dotbox_el_nino_<variety>.png` | per unit (SIMCAST region × Norte/Centro/Sur): box = the 21 non-Niño years, dots = El Niño years coloured by magnitude; years outside the reference range are labelled |
+| `regional_el_nino_<variety>.csv` | one row per unit × variable × year: mean anomaly (units and %), `z_region`, percentile and p against the reference years, Jensen-Shannon (bits), Wasserstein (variable units), zero shares (BU) and their percentiles |
+| `point_composites_<variety>.parquet` | per point: composite z, Δ, permutation p, local and FDR significance |
+| `composite_{z,sig}_<VAR>_<group>_<variety>.tif` | the composites as GeoTIFFs for GIS |
+| `metadata_<variety>.json` | reference years, groups, field-significance results |
 
-KL histograms use bins of 1 application for APP and 10 units for BU and FU. KL
-values are only comparable within one variable: compare each year with the
-non-Niño range printed in the figure title.
+Method:
 
-Events come from `reference/el_nino_costero_enfen2024.csv`: the official
-El Niño Costero list based on the ICEN (ENFEN 2024, Nota Técnica 01‑2024; IGP
-http://met.igp.gob.pe/datos/lista_eventos_ICEN.html). "Mega Niño" = extraordinario.
-A SIMCAST year `Y` (seasons starting in `Y`: Apr–Jul, Jul–Dec, Nov–Apr) is an
-El Niño year when an event covers at least 3 months of any of its seasons; the
-magnitude is the strongest such event. The non-Niño reference excludes **all**
-El Niño years, weak ones included. 2020 is excluded (no Sierra Alta season).
+- **Years.** Official El Niño Costero events (ENFEN 2024, `reference/el_nino_costero_enfen2024.csv`). A SIMCAST year is an El Niño year when an event covers ≥ 3 months of one of its seasons. Groups: *extraordinario* (1982, 1983, 1997, 1998) and *fuerte + moderado* (1986, 1987, 1991, 1992, 2015, 2016). Reference: the 21 years with no event at all; weak-event years are left out of both. 2020 is excluded.
+- **Units.** SIMCAST region (one season each) × latitude zone: Norte ≥ −9°, Centro −15° to −9°, Sur < −15°. Each unit has 9 000 to 143 000 points.
+- **Per point.** z = (year − reference mean) / reference SD, with the SD floored at 0.5. Composite = mean z of the group. Two-sided permutation test of the group vs. reference means, enumerating all relabellings when there are ≤ 20 000 (4 of 25 years), else 20 000 random ones.
+- **Field significance.** Livezey & Chen (1983): the same relabelling is applied to the whole map, keeping spatial correlation, and the share of locally significant points is compared with its distribution under relabelling. A point-wise Benjamini–Hochberg FDR mask (α = 0.10, Wilks 2016) is stored too; with 4–6 El Niño years it rejects almost nothing.
+- **Per unit.** Each reference year is compared with the other 20 (leave-one-out), which gives the natural spread used for `z_region`, the percentiles and p.
 
-KL is `KL(P_year || Q_ref)` in nats between histograms of APP over the same
-302 449 points (`Q_ref` pools all non-Niño years; add-one smoothing). Each
-non-Niño year is also compared with the other non-Niño years (leave-one-out),
-which gives the natural year-to-year KL range shown in the figure title.
+The earlier national KL analysis (`el_nino_analysis.py`, outputs moved to `el_nino_kl_legacy/`) is kept only for reference; its event classification is reused.
 
 ## Colour scales (all maps, animations and figures)
 
