@@ -275,8 +275,11 @@ regional season rasters:
 - `BU_<variety>_<year>.tif` (float32, season sum of blight units)
 - `FU_<variety>_<year>.tif` (float32, season sum of fungicide units)
 
-Same 0.01° grid as the inputs, EPSG:4326, NoData = -9999, LZW, tiled, internal
-overviews, no spaces in the names. The regions never overlap (checked), so each
+Same 0.01° grid as the inputs, EPSG:4326, NoData = -9999, no spaces in the
+names. The layout is a plain GeoTIFF (striped, uncompressed, one page), like the
+regional rasters: an earlier tiled + LZW + floating-point-predictor + internal
+overviews version displayed as stripes with an extra small page in some viewers.
+`merge_year(..., layout="cog")` still writes the compact variant. The regions never overlap (checked), so each
 pixel keeps the value of its own region's season. The band description and the
 metadata tags record the variable, units, variety and the regions merged.
 Note that `cultivo1` (Sierra Alta) of `<year>` runs Nov `<year>`–Apr `<year+1>`,

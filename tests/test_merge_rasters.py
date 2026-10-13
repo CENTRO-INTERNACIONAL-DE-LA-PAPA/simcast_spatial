@@ -34,7 +34,8 @@ def test_merge_year(tmp_path):
     with rasterio.open(out) as s:
         m = s.read(1)
         assert s.crs.to_epsg() == 4326 and s.nodata == -9999
-        assert s.profile["compress"].lower() == "lzw"
+        assert not s.profile.get("tiled") and s.profile.get("compress") is None
+        assert s.overviews(1) == []
         assert s.tags()["n_valid_pixels"] == "20"
         assert "cultivo1:Sierra Alta" in s.tags()["regions_merged"]
     assert (m[:2] == 1).all() and (m[2:] == 2).all()
@@ -52,3 +53,15 @@ def test_merge_all_years_skips_non_year_dirs(tmp_path):
     (y.parent / "not_a_year").mkdir()
     out = merge_all_years(y.parent, variety="susceptible", variables=("BU",))
     assert [p.name for p in out] == ["BU_susceptible_2001.tif"]
+
+
+def test_plain_layout_reads_with_pillow(tmp_path):
+    from PIL import Image
+
+    y = _regions(tmp_path)
+    out = merge_year(y, "BU", variety="resistant")
+    im = Image.open(out)
+    assert getattr(im, "n_frames", 1) == 1
+    assert 322 not in im.tag_v2 and im.tag_v2.get(259) == 1  # no tiles, uncompressed
+    with rasterio.open(out) as s:
+        np.testing.assert_array_equal(np.array(im), s.read(1))

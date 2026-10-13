@@ -18,9 +18,14 @@ Every potato point belongs to exactly one region, so the regional rasters do
 not overlap (checked: overlapping valid pixels raise an error) and the merged
 value of a pixel is the value of its region's season.  The outputs are
 single-band GeoTIFFs in EPSG:4326 with the same 0.01 deg grid as the inputs,
-NoData = -9999, LZW compression, 256x256 tiles and internal overviews, plus
-band description and metadata tags (variable, units, year, variety, seasons
-and regions merged).  File names contain no spaces.
+NoData = -9999, plus band description and metadata tags (variable, units,
+year, variety, seasons and regions merged).  File names contain no spaces.
+
+Layout is deliberately plain (``layout="plain"``, the default): striped,
+uncompressed, one page, the same structure as the regional rasters.  Tiled
+files with a floating-point predictor and internal overviews (``"cog"``) are
+smaller, but several viewers draw the partial edge tiles as stripes and show
+the overviews as extra pages; ArcGIS builds its own pyramids on first open.
 """
 
 from __future__ import annotations
@@ -62,7 +67,7 @@ def merge_year(
     *,
     variety: str,
     overwrite: bool = False,
-    overviews: bool = True,
+    layout: str = "plain",
 ) -> Path | None:
     """Merge one variable for one year; returns the output path (None if no inputs)."""
     year_dir = Path(os.fspath(year_dir))
@@ -99,17 +104,21 @@ def merge_year(
             covered |= valid
             parts.append(f"{cultivo}:{region} ({SEASON_MONTHS.get(cultivo, '?')}, {int(valid.sum())} px)")
 
-    profile.update(
-        driver="GTiff",
-        count=1,
-        dtype=merged.dtype,
-        nodata=NODATA,
-        compress="lzw",
-        predictor=3 if np.issubdtype(merged.dtype, np.floating) else 2,
-        tiled=True,
-        blockxsize=256,
-        blockysize=256,
-    )
+    for k in ("compress", "predictor", "tiled", "blockxsize", "blockysize", "interleave"):
+        profile.pop(k, None)
+    profile.update(driver="GTiff", count=1, dtype=merged.dtype, nodata=NODATA)
+    if layout == "cog":
+        profile.update(
+            compress="lzw",
+            predictor=3 if np.issubdtype(merged.dtype, np.floating) else 2,
+            tiled=True,
+            blockxsize=256,
+            blockysize=256,
+        )
+    elif layout == "plain":
+        profile.update(tiled=False, compress="none")
+    else:
+        raise ValueError("layout must be 'plain' or 'cog'")
     tmp = out.with_suffix(".tmp.tif")
     with rasterio.open(tmp, "w", **profile) as dst:
         dst.write(merged, 1)
@@ -125,7 +134,7 @@ def merge_year(
             n_valid_pixels=str(int(covered.sum())),
             source="SIMCAST-spatial (CIP); AI-assisted processing, review before use",
         )
-        if overviews:
+        if layout == "cog":
             dst.build_overviews([2, 4, 8], Resampling.nearest)
             dst.update_tags(ns="rio_overview", resampling="nearest")
     os.replace(tmp, out)
@@ -138,13 +147,14 @@ def merge_all_years(
     variety: str,
     variables=("APP", "BU", "FU"),
     overwrite: bool = False,
+    layout: str = "plain",
 ) -> list[Path]:
     """Merge every ``<results_root>/<year>/`` folder for the given variables."""
     root = Path(os.fspath(results_root))
     written = []
     for year_dir in sorted(p for p in root.iterdir() if p.is_dir() and _YEAR_RE.match(p.name)):
         for var in variables:
-            out = merge_year(year_dir, var, variety=variety, overwrite=overwrite)
+            out = merge_year(year_dir, var, variety=variety, overwrite=overwrite, layout=layout)
             if out is not None:
                 written.append(out)
     print(f"[merge] {root}: {len(written)} merged rasters ({variety})")

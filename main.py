@@ -143,7 +143,11 @@ def run(steps, varieties, *, start_year=1981, end_year=2020, animation_vars=("AP
         if "merge" in steps:
             from merge_rasters import merge_all_years
 
-            merge_all_years(results_root, variety=VT_NAMES.get(vt, vt).replace(" ", "_"))
+            merge_all_years(
+                results_root,
+                variety=VT_NAMES.get(vt, vt).replace(" ", "_"),
+                overwrite=True,  # cheap (~10 s); keeps merged files in sync
+            )
 
         stats_parquet_path = results_root / "statistical_trends_all.parquet"
         yearly_parquet_path = results_root / "yearly_aggregated_data.parquet"
