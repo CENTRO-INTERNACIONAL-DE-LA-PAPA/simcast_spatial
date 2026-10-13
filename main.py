@@ -9,7 +9,7 @@ Build inputs (PISCOp v3.0 prec + reused tmax/tmin/td)::
 
 Full rerun for resistant and susceptible varieties::
 
-    uv run python main.py --steps simcast rasters trend maps animations --vt r s
+    uv run python main.py --steps simcast rasters merge trend maps animations --vt r s
 
 Steps run in the order listed in STEP_ORDER, whatever order they are given in.
 Paths live in `config.py` (`EXAMPLE_SOURCES`, `EXAMPLE_PATHS`, `RESULTS_ROOTS`).
@@ -27,6 +27,7 @@ STEP_ORDER = [
     "masking",  # legacy: NetCDF -> parquet (masking.py)
     "simcast",  # SIMCAST per season -> simcast_results.parquet + APP tif
     "rasters",  # BU/FU season-sum GeoTIFFs
+    "merge",  # one GeoTIFF per year and variable (all regions) for ArcGIS
     "trend",  # OLS trend stats + yearly table (with lon/lat/altitude)
     "maps",  # trend significance / coefficient PNGs
     "animations",  # APP, BU, FU "all lands" GIF + MP4
@@ -138,6 +139,11 @@ def run(steps, varieties, *, start_year=1981, end_year=2020, animation_vars=("AP
                 workers=resources.prepare_workers,
                 skip_existing=True,
             )
+
+        if "merge" in steps:
+            from merge_rasters import merge_all_years
+
+            merge_all_years(results_root, variety=VT_NAMES.get(vt, vt).replace(" ", "_"))
 
         stats_parquet_path = results_root / "statistical_trends_all.parquet"
         yearly_parquet_path = results_root / "yearly_aggregated_data.parquet"

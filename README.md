@@ -114,11 +114,11 @@ uv run python main.py --steps prepare
 ```
 
 ```bash
-uv run python main.py --steps simcast rasters trend maps animations --vt r s
+uv run python main.py --steps simcast rasters merge trend maps animations --vt r s
 ```
 
 Steps: `prepare`, `resampling`, `masking` (legacy), `simcast`, `rasters`,
-`trend`, `maps`, `animations`. `--vt` takes the resistance classes
+`merge`, `trend`, `maps`, `animations`. `--vt` takes the resistance classes
 (`s`, `ms`, `mr`, `r`, `hr`); each one writes to `config.RESULTS_ROOTS[vt]`
 (`results_resistant_v3`, `results_susceptible_v3`).
 
@@ -264,6 +264,23 @@ Uses `animation_all_lands.generate_bu_fu_rasters(...)` to write:
 - `FU_sum_<year>_<period>_<region>.tif`
 
 Rasters are built with the vectorised grid writer shared with `load_variables.create_raster` (pixel-identical to the previous `iterrows` version, ~2 s instead of ~40 s per raster), in parallel over season files, skipping rasters that already exist.
+
+### Step 4b — Merged yearly rasters for ArcGIS
+
+`uv run python main.py --steps merge --vt r s` (`merge_rasters.py`) writes, in
+every `<results_root>/<year>/` folder, one GeoTIFF per variable joining the three
+regional season rasters:
+
+- `APP_<variety>_<year>.tif` (int16, max applications per season)
+- `BU_<variety>_<year>.tif` (float32, season sum of blight units)
+- `FU_<variety>_<year>.tif` (float32, season sum of fungicide units)
+
+Same 0.01° grid as the inputs, EPSG:4326, NoData = -9999, LZW, tiled, internal
+overviews, no spaces in the names. The regions never overlap (checked), so each
+pixel keeps the value of its own region's season. The band description and the
+metadata tags record the variable, units, variety and the regions merged.
+Note that `cultivo1` (Sierra Alta) of `<year>` runs Nov `<year>`–Apr `<year+1>`,
+and 2020 has no Sierra Alta because the climate inputs end in Dec 2020.
 
 ### Step 5 — “All lands” animations (APP, BU, FU)
 
