@@ -36,3 +36,8 @@ def test_kl_basic():
     a, b = np.array([2.0, 1.0, 1.0]), np.array([1.0, 1.0, 2.0])
     pa, pb = a / a.sum(), b / b.sum()
     assert kl_divergence(a, b, alpha=0.0) == pytest.approx(np.sum(pa * np.log(pa / pb)))
+
+
+def test_histogram_bin_width():
+    h = histogram(np.array([0.0, 9.9, 10.0, 25.0]), 3, bin_width=10.0)
+    assert h.tolist() == [2.0, 1.0, 1.0]

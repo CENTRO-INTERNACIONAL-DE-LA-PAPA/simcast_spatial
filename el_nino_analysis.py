@@ -1,10 +1,10 @@
 """
-Fungicide applications (APP) in El Niño years vs. the non-Niño average.
+SIMCAST outputs (APP, BU, FU) in El Niño years vs. the non-Niño average.
 
 Inputs
 ------
-* Merged yearly APP rasters ``<results_root>/<year>/APP_<variety>_<year>.tif``
-  (see ``merge_rasters.py``).
+* Merged yearly rasters ``<results_root>/<year>/<VAR>_<variety>_<year>.tif``
+  with VAR in APP, BU, FU (see ``merge_rasters.py``).
 * A table of El Niño events (``events_csv``) with columns
   ``start`` (YYYY-MM), ``end`` (YYYY-MM), ``magnitude`` and ``source``.
 
@@ -20,8 +20,10 @@ Statistics
 ----------
 * Reference ("promedio sin Niño"): all non-Niño years pooled.  The map shows
   the per-pixel mean; the KL reference distribution is the pooled
-  distribution of yearly APP values (APP is an integer count, so the
-  distributions are histograms over 0, 1, 2, ...).
+  distribution of the yearly values.  Distributions are histograms with a
+  fixed bin width per variable (``VARIABLES``): 1 application for APP
+  (integer counts), 10 units for the season sums BU and FU (values up to
+  ~1000).
 * ``KL(P_year || Q_ref)`` in nats, with add-one (Laplace) smoothing of the
   counts so empty bins do not give infinite values.
 * Only pixels valid in every analysed year are used, so all distributions
@@ -55,6 +57,13 @@ MAGNITUDE_LABELS = {
     "moderado": "Moderado",
     "fuerte": "Fuerte",
     "extraordinario": "Extraordinario\n(mega Niño)",
+}
+
+# variable -> (bin width for the KL histograms, short label, long label, colormap)
+VARIABLES = {
+    "APP": (1.0, "aplicaciones", "Aplicaciones de fungicida por campaña (APP)", "PuRd"),
+    "BU": (10.0, "BU", "Blight Units, suma por campaña (BU)", "YlOrRd"),
+    "FU": (10.0, "FU", "Fungicide Units, suma por campaña (FU)", "YlGnBu"),
 }
 
 
@@ -118,9 +127,9 @@ def classify_years(
 
 
 @dataclass
-class AppStack:
+class ValueStack:
     years: list[int]
-    data: np.ndarray  # (n_years, n_pixels) int, only common valid pixels
+    data: np.ndarray  # (n_years, n_pixels), only common valid pixels
     rows: np.ndarray
     cols: np.ndarray
     shape: tuple[int, int]
@@ -128,12 +137,12 @@ class AppStack:
     crs: object
 
 
-def load_app_stack(results_root, variety: str, years) -> AppStack:
-    """Read the merged APP rasters and keep the pixels valid in every year."""
+def load_stack(results_root, variety: str, years, variable: str = "APP") -> ValueStack:
+    """Read the merged yearly rasters of one variable; keep pixels valid in every year."""
     root = Path(os.fspath(results_root))
     arrays, ok_years = [], []
     for y in years:
-        p = root / str(y) / f"APP_{variety}_{y}.tif"
+        p = root / str(y) / f"{variable}_{variety}_{y}.tif"
         if not p.exists():
             raise FileNotFoundError(p)
         with rasterio.open(p) as src:
@@ -146,11 +155,20 @@ def load_app_stack(results_root, variety: str, years) -> AppStack:
     stack = np.ma.stack(arrays)
     common = ~np.ma.getmaskarray(stack).any(axis=0)
     rows, cols = np.nonzero(common)
-    data = np.asarray(stack[:, rows, cols]).astype(np.int64)
-    return AppStack(ok_years, data, rows, cols, shape, extent, crs)
+    data = np.asarray(stack[:, rows, cols])
+    if np.allclose(data, np.round(data)):
+        data = np.round(data).astype(np.int64)
+    return ValueStack(ok_years, data, rows, cols, shape, extent, crs)
 
 
-def to_image(stack: AppStack, values: np.ndarray) -> np.ma.MaskedArray:
+def load_app_stack(results_root, variety: str, years) -> ValueStack:
+    return load_stack(results_root, variety, years, "APP")
+
+
+AppStack = ValueStack  # backwards-compatible name
+
+
+def to_image(stack: ValueStack, values: np.ndarray) -> np.ma.MaskedArray:
     img = np.full(stack.shape, np.nan)
     img[stack.rows, stack.cols] = values
     return np.ma.masked_invalid(img)
@@ -161,8 +179,10 @@ def to_image(stack: AppStack, values: np.ndarray) -> np.ma.MaskedArray:
 # ----------------------------------------------------------------------------
 
 
-def histogram(values: np.ndarray, n_bins: int) -> np.ndarray:
-    return np.bincount(values.ravel(), minlength=n_bins)[:n_bins].astype(np.float64)
+def histogram(values: np.ndarray, n_bins: int, *, bin_width: float = 1.0) -> np.ndarray:
+    """Counts in bins [k*w, (k+1)*w) for k = 0..n_bins-1 (values must be >= 0)."""
+    idx = np.floor(np.asarray(values, dtype=np.float64).ravel() / bin_width).astype(np.int64)
+    return np.bincount(np.clip(idx, 0, n_bins - 1), minlength=n_bins)[:n_bins].astype(np.float64)
 
 
 def kl_divergence(p_counts: np.ndarray, q_counts: np.ndarray, *, alpha: float = 1.0) -> float:
@@ -175,10 +195,12 @@ def kl_divergence(p_counts: np.ndarray, q_counts: np.ndarray, *, alpha: float = 
 
 
 def analyse(
-    stack: AppStack,
+    stack: ValueStack,
     years_table: pd.DataFrame,
     *,
     alpha: float = 1.0,
+    variable: str = "APP",
+    bin_width: float | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray]:
     """
     KL of every year vs. the non-Niño reference.
@@ -188,8 +210,9 @@ def analyse(
     """
     yt = years_table.set_index("year").loc[stack.years]
     nino = yt["is_nino"].to_numpy()
-    n_bins = int(stack.data.max()) + 1
-    hists = np.stack([histogram(stack.data[i], n_bins) for i in range(len(stack.years))])
+    w = bin_width if bin_width is not None else VARIABLES.get(variable, (1.0,))[0]
+    n_bins = int(np.floor(float(stack.data.max()) / w)) + 1
+    hists = np.stack([histogram(stack.data[i], n_bins, bin_width=w) for i in range(len(stack.years))])
     ref_counts = hists[~nino].sum(axis=0)
     ref_mean = stack.data[~nino].mean(axis=0)
 
@@ -203,9 +226,10 @@ def analyse(
                 "magnitude": yt.loc[y, "magnitude"],
                 "events": yt.loc[y, "events"],
                 "kl_nats": kl_divergence(hists[i], q, alpha=alpha),
-                "mean_app": float(stack.data[i].mean()),
-                "ref_mean_app": float(ref_mean.mean()),
-                "delta_mean_app": float(stack.data[i].mean() - ref_mean.mean()),
+                f"mean_{variable.lower()}": float(stack.data[i].mean()),
+                f"ref_mean_{variable.lower()}": float(ref_mean.mean()),
+                f"delta_mean_{variable.lower()}": float(stack.data[i].mean() - ref_mean.mean()),
+                "kl_bin_width": w,
                 **{c: yt.loc[y, c] for c in yt.columns if c.startswith("overlap_")},
             }
         )
@@ -218,7 +242,7 @@ def analyse(
 
 
 def plot_nino_maps(
-    stack: AppStack,
+    stack: ValueStack,
     table: pd.DataFrame,
     ref_mean: np.ndarray,
     *,
@@ -229,6 +253,7 @@ def plot_nino_maps(
     ncols_max: int = 12,
     min_magnitude: str = "moderado",
     anomaly: bool = False,
+    variable: str = "APP",
 ):
     """
     Reference map + one Peru map per El Niño year (magnitude >= ``min_magnitude``),
@@ -288,11 +313,11 @@ def plot_nino_maps(
         ax.set_ylim(-18.5, -3.3)  # potato area (about -18.3 .. -4.4)
         ax.set_title(name, fontsize=12, fontweight="bold")
         if r is None:
-            sub = f"{len(non)} años sin Niño\nAPP medio {float(np.mean(values)):.2f}"
+            sub = f"{len(non)} años sin Niño\n{variable} medio {float(np.mean(values)):.2f}"
         else:
             sub = (f"{MAGNITUDE_LABELS.get(r['magnitude'], r['magnitude'])}\n"
                    f"KL = {r['kl_nats']:.3f} nats\n"
-                   f"ΔAPP medio {r['delta_mean_app']:+.2f}")
+                   f"Δ{variable} medio {r[f'delta_mean_{variable.lower()}']:+.2f}")
         ax.text(0.5, -0.02, sub, transform=ax.transAxes, ha="center", va="top", fontsize=10)
 
     q = non["kl_nats"]
@@ -304,16 +329,16 @@ def plot_nino_maps(
     if im is not None and not anomaly:
         cax = fig.add_axes([0.3, 0.06, 0.4, 0.025])
         cb = fig.colorbar(im, cax=cax, orientation="horizontal", extend="max")
-        cb.set_label("Aplicaciones de fungicida por campaña (APP)")
+        cb.set_label(VARIABLES.get(variable, (None, None, variable))[2])
     if anomaly:
         if im is not None:
             cax = fig.add_axes([0.02, 0.06, 0.12, 0.025])
             cb = fig.colorbar(im, cax=cax, orientation="horizontal", extend="max")
-            cb.set_label("APP promedio sin Niño")
+            cb.set_label(f"{variable} promedio sin Niño")
         if im_anom is not None:
             cax = fig.add_axes([0.35, 0.06, 0.4, 0.025])
             cb = fig.colorbar(im_anom, cax=cax, orientation="horizontal", extend="both")
-            cb.set_label("Año Niño − promedio sin Niño (aplicaciones por campaña)")
+            cb.set_label(f"Año Niño − promedio sin Niño ({VARIABLES.get(variable, (None, variable))[1]} por campaña)")
     fig.subplots_adjust(left=0.01, right=0.99, top=0.82, bottom=0.2, wspace=0.04, hspace=0.6)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=160)
@@ -332,42 +357,51 @@ def run_el_nino_analysis(
     min_magnitude: str = "moderado",
     gadm_peru_gpkg=None,
     out_dir=None,
+    variable: str = "APP",
 ) -> dict[str, str]:
-    """Classify years, compute KL vs. the non-Niño reference, write CSV + figure."""
+    """Classify years, compute KL vs. the non-Niño reference, write CSV + figures."""
     out_dir = Path(os.fspath(out_dir or results_root)) / "el_nino"
     out_dir.mkdir(parents=True, exist_ok=True)
     events = load_events(events_csv)
     years = list(years)
     years_table = classify_years(events, years, min_overlap_months=min_overlap_months)
-    stack = load_app_stack(results_root, variety, years)
-    table, ref_mean = analyse(stack, years_table)
+    var = variable.upper()
+    v = var.lower()
+    _, _, long_label, cmap = VARIABLES[var]
+    stack = load_stack(results_root, variety, years, var)
+    table, ref_mean = analyse(stack, years_table, variable=var)
     table.insert(1, "variety", variety)
-    csv_path = out_dir / f"kl_app_el_nino_{variety}.csv"
+    table.insert(2, "variable", var)
+    csv_path = out_dir / f"kl_{v}_el_nino_{variety}.csv"
     table.round(4).to_csv(csv_path, index=False)
-    png_path = out_dir / f"app_el_nino_vs_promedio_{variety}.png"
+    png_path = out_dir / f"{v}_el_nino_vs_promedio_{variety}.png"
     plot_nino_maps(
         stack,
         table,
         ref_mean,
-        title=(f"Aplicaciones de fungicida (APP), variedad {variety_label}: años El Niño costero "
+        title=(f"{long_label}, variedad {variety_label}: años El Niño costero "
                f"(ENFEN 2024, magnitud ≥ {min_magnitude}) vs. promedio sin Niño, "
                f"{years[0]}-{years[-1]}"),
         out_path=png_path,
         gadm_peru_gpkg=gadm_peru_gpkg,
         min_magnitude=min_magnitude,
+        variable=var,
+        cmap=cmap,
     )
-    anom_path = out_dir / f"app_el_nino_anomalia_{variety}.png"
+    anom_path = out_dir / f"{v}_el_nino_anomalia_{variety}.png"
     plot_nino_maps(
         stack,
         table,
         ref_mean,
-        title=(f"Anomalía de aplicaciones (APP), variedad {variety_label}: año El Niño costero "
+        title=(f"Anomalía — {long_label}, variedad {variety_label}: año El Niño costero "
                f"− promedio sin Niño, {years[0]}-{years[-1]}"),
         out_path=anom_path,
         gadm_peru_gpkg=gadm_peru_gpkg,
         min_magnitude=min_magnitude,
         anomaly=True,
+        variable=var,
+        cmap=cmap,
     )
-    print(f"[el_nino] {variety}: {int(table.is_nino.sum())} Niño years, "
+    print(f"[el_nino] {variety} {var}: {int(table.is_nino.sum())} Niño years, "
           f"{int((~table.is_nino).sum())} reference years, {stack.data.shape[1]} pixels -> {png_path}")
     return {"csv": os.fspath(csv_path), "png": os.fspath(png_path), "anomaly_png": os.fspath(anom_path)}

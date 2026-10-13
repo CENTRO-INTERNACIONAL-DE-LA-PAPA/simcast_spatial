@@ -309,16 +309,20 @@ wash out the map; pass `None` for the true maximum. The lower-level helpers
 
 Optional: boundary overlay via GADM (`animation_all_lands.load_gadm_peru`). A URL is downloaded once to `~/.cache/simcast_spatial/` and reused by every map; if you can’t access the URL, download the `.gpkg` and point to the local path. Years without any BU raster (e.g. 2020, which has no `prec`) are skipped.
 
-### Step 6 — El Niño years vs. the non-Niño average
+### Step 6 — El Niño years vs. the non-Niño average (APP, BU, FU)
 
 `uv run python main.py --steps elnino --vt r s` (`el_nino_analysis.py`) writes to
-`<results_root>/el_nino/`:
+`<results_root>/el_nino/`, for each variable `<var>` in `app`, `bu`, `fu`:
 
-- `kl_app_el_nino_<variety>.csv`: one row per year (1981–2019) with the overlap of
-  El Niño with each season, `is_nino`, `magnitude`, KL divergence and mean APP.
-- `app_el_nino_vs_promedio_<variety>.png`: the non-Niño mean APP map, then one map
+- `kl_<var>_el_nino_<variety>.csv`: one row per year (1981–2019) with the overlap of
+  El Niño with each season, `is_nino`, `magnitude`, KL divergence and mean value.
+- `<var>_el_nino_vs_promedio_<variety>.png`: the non-Niño mean map, then one map
   per El Niño year (magnitude ≥ moderado) left to right, with magnitude and KL below.
-- `app_el_nino_anomalia_<variety>.png`: the same years as anomalies (year − mean).
+- `<var>_el_nino_anomalia_<variety>.png`: the same years as anomalies (year − mean).
+
+KL histograms use bins of 1 application for APP and 10 units for BU and FU. KL
+values are only comparable within one variable: compare each year with the
+non-Niño range printed in the figure title.
 
 Events come from `reference/el_nino_costero_enfen2024.csv`: the official
 El Niño Costero list based on the ICEN (ENFEN 2024, Nota Técnica 01‑2024; IGP
