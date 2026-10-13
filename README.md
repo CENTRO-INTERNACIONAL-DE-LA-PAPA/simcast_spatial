@@ -309,6 +309,30 @@ wash out the map; pass `None` for the true maximum. The lower-level helpers
 
 Optional: boundary overlay via GADM (`animation_all_lands.load_gadm_peru`). A URL is downloaded once to `~/.cache/simcast_spatial/` and reused by every map; if you can’t access the URL, download the `.gpkg` and point to the local path. Years without any BU raster (e.g. 2020, which has no `prec`) are skipped.
 
+### Step 6 — El Niño years vs. the non-Niño average
+
+`uv run python main.py --steps elnino --vt r s` (`el_nino_analysis.py`) writes to
+`<results_root>/el_nino/`:
+
+- `kl_app_el_nino_<variety>.csv`: one row per year (1981–2019) with the overlap of
+  El Niño with each season, `is_nino`, `magnitude`, KL divergence and mean APP.
+- `app_el_nino_vs_promedio_<variety>.png`: the non-Niño mean APP map, then one map
+  per El Niño year (magnitude ≥ moderado) left to right, with magnitude and KL below.
+- `app_el_nino_anomalia_<variety>.png`: the same years as anomalies (year − mean).
+
+Events come from `reference/el_nino_costero_enfen2024.csv`: the official
+El Niño Costero list based on the ICEN (ENFEN 2024, Nota Técnica 01‑2024; IGP
+http://met.igp.gob.pe/datos/lista_eventos_ICEN.html). "Mega Niño" = extraordinario.
+A SIMCAST year `Y` (seasons starting in `Y`: Apr–Jul, Jul–Dec, Nov–Apr) is an
+El Niño year when an event covers at least 3 months of any of its seasons; the
+magnitude is the strongest such event. The non-Niño reference excludes **all**
+El Niño years, weak ones included. 2020 is excluded (no Sierra Alta season).
+
+KL is `KL(P_year || Q_ref)` in nats between histograms of APP over the same
+302 449 points (`Q_ref` pools all non-Niño years; add-one smoothing). Each
+non-Niño year is also compared with the other non-Niño years (leave-one-out),
+which gives the natural year-to-year KL range shown in the figure title.
+
 ## Resource notes (CPU/RAM)
 
 - This pipeline is **CPU/I-O-bound**; `simcast.py` uses Numba to JIT-compile inner loops and NumPy for the hourly reconstruction (no CUDA/GPU code path, see "Where the time goes" above).

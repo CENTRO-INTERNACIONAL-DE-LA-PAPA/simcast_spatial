@@ -32,6 +32,7 @@ STEP_ORDER = [
     "trend",  # OLS trend stats + yearly table (with lon/lat/altitude)
     "maps",  # trend significance / coefficient PNGs
     "animations",  # APP, BU, FU "all lands" GIF + MP4
+    "elnino",  # APP in El Niño years vs. non-Niño average, KL divergence + figure
 ]
 
 VT_NAMES = {"s": "susceptible", "ms": "moderately susceptible", "mr": "moderately resistant",
@@ -208,6 +209,22 @@ def run(steps, varieties, *, start_year=1981, end_year=2020, animation_vars=("AP
                     vmax_percentile=99.0,
                     fps=3,
                 )
+
+        if "elnino" in steps:
+            from pathlib import Path
+
+            from el_nino_analysis import run_el_nino_analysis
+
+            run_el_nino_analysis(
+                results_root=results_root,
+                variety=label.replace(" ", "_"),
+                variety_label={"resistant": "resistente", "susceptible": "susceptible"}.get(label, label),
+                events_csv=Path(__file__).parent / "reference" / "el_nino_costero_enfen2024.csv",
+                years=range(start_year, min(end_year, 2019) + 1),  # 2020 lacks Sierra Alta
+                min_overlap_months=3,
+                min_magnitude="moderado",
+                gadm_peru_gpkg=vpaths.gadm_peru_gpkg,
+            )
 
         print(f"[{vt}] finished in {(time.perf_counter() - t0) / 60:.1f} min", flush=True)
 
