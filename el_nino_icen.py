@@ -35,6 +35,8 @@ Outputs in ``<results_root>/el_nino_icen/``
 * ``icen_event_maps_<variety>.png`` - the mean of the neutral seasons, then
   one anomaly map per El Niño event; each region shows the season of that
   event with the highest ICEN (only if it was warm, ICEN > 0.5).
+* ``icen_story_1991_vs_1997_<variety>.png`` - infographic: same warm coast,
+  opposite effects in the highlands (rain -> humid days -> BU -> FU -> APP).
 * ``icen_regional_<variety>.csv`` - the data behind the scatter plots.
 * ``icen_summary_<variety>.json`` - regional slopes and field significance.
 """
@@ -451,6 +453,232 @@ def plot_event_maps(pts, mats, x_by_region, years, grid, *, title, out_path, gad
 
 
 # ----------------------------------------------------------------------------
+# Story figure: two El Niño events side by side
+# ----------------------------------------------------------------------------
+
+CULTIVO = {"Sierra Media": "cultivo3", "Costa y Valle Interandino": "cultivo2", "Sierra Alta": "cultivo1"}
+WET_HOURS = 7  # fewest daily hours with RH >= 90 % that produce blight units
+
+
+def _season_climate(args):
+    """Per point of one season: total rain (mm) and days with >= WET_HOURS humid hours."""
+    root, region, year = args
+    f = Path(root) / str(year) / CULTIVO[region] / region / "simcast_results.parquet"
+    d = pd.read_parquet(f, columns=["ID", "hr_ge_thresh", "rain_mm"])
+    d["wet"] = d["hr_ge_thresh"] >= WET_HOURS
+    g = d.groupby("ID").agg(rain=("rain_mm", "sum"), wet=("wet", "sum"))
+    return region, year, g
+
+
+def point_climate(results_root, seasons, workers: int = 8) -> dict:
+    """{(region, year): DataFrame[ID -> rain, wet]} for the requested seasons."""
+    import concurrent.futures as cf
+
+    jobs = [(os.fspath(results_root), r, y) for r, y in sorted(set(seasons))]
+    out = {}
+    with cf.ProcessPoolExecutor(max_workers=workers) as ex:
+        for region, year, g in ex.map(_season_climate, jobs):
+            out[(region, year)] = g
+    return out
+
+
+def plot_event_story(pts, mats, x_by_region, years, grid, results_root, icen, *,
+                     events=("1991–92", "1997–98"), variety_label="", out_path, gadm_peru_gpkg=None):
+    """
+    Infographic: the same warm coastal index, opposite effects in the
+    highlands.  Columns = events; rows = rain -> humid days -> BU -> FU -> APP.
+    Each region uses its own season of the event (warmest ICEN).
+    """
+    import textwrap
+
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec
+
+    from viz_palette import NEUTRAL, RED, diverging_classes
+
+    ev_all = event_seasons(x_by_region)
+    ev = {e: ev_all[e] for e in events}
+    yi = {y: i for i, y in enumerate(years)}
+    regions = pts["region"].to_numpy()
+    zones = pts["zone"].to_numpy()
+    ids = pts["ID"].to_numpy()
+    neutral = {r: [y for y in years if -0.7 <= x_by_region.loc[y, r] < 0.5] for r in SEASON_MONTHS}
+
+    need = [(r, y) for r, ys in neutral.items() for y in ys]
+    need += [(r, c[0]) for per in ev.values() for r, c in per.items() if c is not None]
+    clim = point_climate(results_root, need)
+
+    def clim_array(region, ys, col):
+        stack = np.stack([clim[(region, y)][col].reindex(ids[regions == region]).to_numpy() for y in ys])
+        return stack.mean(axis=0)
+
+    rows = [
+        ("rain", "Lluvia en la campaña", "% respecto a lo normal"),
+        ("wet", f"Días con ≥ {WET_HOURS} h de humedad ≥ 90 %", "días respecto a lo normal"),
+        ("ABU", "Presión de tizón (BU)", "BU respecto a lo normal"),
+        ("AFU", "Lavado del fungicida (FU)", "FU respecto a lo normal"),
+        ("APP", "Aplicaciones de fungicida", "aplicaciones respecto a lo normal"),
+    ]
+    anom = {k: {} for k, _, _ in rows}
+    ref_rain = np.full(len(pts), np.nan)
+    for r in SEASON_MONTHS:
+        ref_rain[regions == r] = clim_array(r, neutral[r], "rain")
+    for e, per in ev.items():
+        for k, _, _ in rows:
+            anom[k][e] = np.full(len(pts), np.nan)
+        rain_e = np.full(len(pts), np.nan)
+        for r, c in per.items():
+            if c is None:
+                continue
+            m = regions == r
+            y = c[0]
+            rain_e[m] = clim[(r, y)]["rain"].reindex(ids[m]).to_numpy()
+            anom["wet"][e][m] = clim[(r, y)]["wet"].reindex(ids[m]).to_numpy() - clim_array(r, neutral[r], "wet")
+            for k in ("ABU", "AFU", "APP"):
+                ref = mats[k][m][:, [yi[q] for q in neutral[r]]].mean(axis=1)
+                anom[k][e][m] = mats[k][m, yi[y]] - ref
+        with np.errstate(divide="ignore", invalid="ignore"):
+            anom["rain"][e] = np.where(ref_rain >= 5, 100 * (rain_e / ref_rain - 1), np.nan)
+        anom["rain"][e + "_abs"] = rain_e
+
+    def zone_text(k, e):
+        out = []
+        for z in ("Norte", "Sur"):
+            m = zones == z
+            if k == "rain":
+                tot_e = np.nansum(anom["rain"][e + "_abs"][m])
+                tot_r = np.nansum(ref_rain[m])
+                v = 100 * (tot_e / tot_r - 1)
+                out.append(f"{z}: {v:+.0f} %")
+            else:
+                v = np.nanmean(anom[k][e][m])
+                fmt = "{:+.1f}" if k in ("APP", "wet") else "{:+.0f}"
+                out.append(f"{z}: " + fmt.format(v))
+        return "   ".join(out)
+
+    # ---- layout --------------------------------------------------------
+    t = grid["transform"]
+    extent = [t.c, t.c + grid["ncols"] * t.a, t.f + grid["nrows"] * t.e, t.f]
+    pos = pd.Index(grid["ids"]).get_indexer(ids)
+    yy, xx = grid["y_idx"][pos], grid["x_idx"][pos]
+
+    def image(vals):
+        img = np.full((grid["nrows"], grid["ncols"]), np.nan)
+        img[yy, xx] = vals
+        return np.ma.masked_invalid(img)
+
+    adm0 = adm1 = None
+    if gadm_peru_gpkg is not None:
+        try:
+            from animation_all_lands import load_gadm_peru
+
+            adm0, adm1 = load_gadm_peru(gadm_peru_gpkg)
+        except Exception as e_:
+            print(f"[el_nino_icen] no GADM: {e_}")
+
+    fig = plt.figure(figsize=(11.5, 30))
+    gs = GridSpec(1 + len(rows), 3, figure=fig, width_ratios=[1, 1, 0.07],
+                  height_ratios=[0.55] + [1] * len(rows), hspace=0.32, wspace=0.05,
+                  left=0.13, right=0.92, top=0.915, bottom=0.075)
+
+    fig.text(0.5, 0.985, "Dos Niños costeros, dos efectos opuestos en la sierra",
+             ha="center", va="top", fontsize=19, fontweight="bold")
+    fig.text(0.5, 0.968, "\n".join(textwrap.wrap(
+        "Ambos eventos calentaron el mar frente a la costa (ICEN > 0.5). Lo que decide el tizón tardío es lo que "
+        "pasa en la sierra durante la campaña: la lluvia y las horas de alta humedad. "
+        f"Variedad {variety_label}. Rojo: más que en una campaña normal; azul: menos.", 105)),
+             ha="center", va="top", fontsize=10.5, color="#52514e")
+
+    # row 0: ICEN time series with the seasons used
+    season_color = {"Costa y Valle Interandino": "#898781", "Sierra Media": "#52514e", "Sierra Alta": "#0b0b0b"}
+    for j, (e, per) in enumerate(ev.items()):
+        ax = fig.add_subplot(gs[0, j])
+        y0, y1 = EVENTS[e]
+        span = pd.period_range(f"{y0}-01", f"{y1 + 1}-06", freq="M")
+        vals = icen.reindex(span).to_numpy()
+        xs = np.arange(len(span))
+        ax.axhspan(0.5, 6, color=RED[100], alpha=0.5, lw=0)
+        ax.axhline(0.5, color=RED[300], lw=0.8, ls=(0, (3, 2)))
+        ax.plot(xs, vals, color="#0b0b0b", lw=2)
+        for k, r in enumerate(REGION_ORDER):
+            c = per[r]
+            if c is None:
+                continue
+            a, b = SEASON_MONTHS[r]
+            start = (c[0] - y0) * 12 + a
+            ax.plot([start, start + (b - a)], [-1.25 - 0.32 * k] * 2, color=season_color[r], lw=5,
+                    solid_capstyle="butt")
+            ax.text(start + (b - a) + 0.6, -1.25 - 0.32 * k, f"{REGION_SHORT[r]} (ICEN {c[1]:.1f})",
+                    va="center", fontsize=7.5, color=season_color[r])
+        ax.set_ylim(-2.2, 4.6)
+        ax.set_xlim(0, len(span) + 9)
+        ticks = [i for i, pnt in enumerate(span) if pnt.month == 1]
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([str(span[i].year) for i in ticks], fontsize=8)
+        ax.tick_params(axis="y", labelsize=8)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+        ax.set_title(f"El Niño {e}", fontsize=15, fontweight="bold", pad=8)
+        if j == 0:
+            ax.set_ylabel("ICEN\n(mar costero)", fontsize=9)
+        ax.text(0.01, 0.97, "zona cálida", transform=ax.transAxes, fontsize=7, color=RED[450], va="top")
+
+    # rows 1..: maps
+    for i, (k, name, unit) in enumerate(rows, start=1):
+        vals_all = np.concatenate([anom[k][e][np.isfinite(anom[k][e])] for e in ev])
+        cls = diverging_classes(vals_all, n_per_arm=4, percentile=97)
+        cmap, norm = cls.cmap_norm()
+        im = None
+        for j, e in enumerate(ev):
+            ax = fig.add_subplot(gs[i, j])
+            im = ax.imshow(image(anom[k][e]), extent=extent, origin="upper", cmap=cmap, norm=norm,
+                           interpolation="nearest")
+            if adm1 is not None:
+                adm1.boundary.plot(ax=ax, edgecolor="0.62", linewidth=0.3)
+                adm0.boundary.plot(ax=ax, edgecolor="black", linewidth=0.6)
+            ax.axhline(-9, color="0.45", lw=0.5, ls=(0, (4, 3)))
+            ax.axhline(-15, color="0.45", lw=0.5, ls=(0, (4, 3)))
+            ax.set_xlim(-81.3, -68.5)
+            ax.set_ylim(-18.5, -3.3)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.text(0.5, -0.025, zone_text(k, e), transform=ax.transAxes, ha="center", va="top",
+                    fontsize=10, fontweight="bold", color="#0b0b0b")
+            if j == 0:
+                ax.text(-0.06, 0.5, f"{i}. {name}", transform=ax.transAxes, rotation=90, ha="right",
+                        va="center", fontsize=12, fontweight="bold")
+        cax = fig.add_subplot(gs[i, 2])
+        cb = fig.colorbar(im, cax=cax, extend="both", spacing="uniform", ticks=cls.boundaries)
+        cb.ax.set_yticklabels([f"{b:g}".replace("-", "−") for b in cls.boundaries])
+        cb.ax.tick_params(labelsize=8, length=0)
+        cb.outline.set_visible(False)
+        cb.set_label(unit, fontsize=8.5)
+        if i < len(rows):
+            fig.text(0.075, cax.get_position().y0 - 0.006, "↓", ha="center", va="center", fontsize=20,
+                     color="#898781")
+
+    takeaway = [
+        ("1991–92, Niño seco en la sierra:", "menos lluvia → menos lavado del fungicida y, en el sur, menos horas "
+         "húmedas → menos tizón → menos aplicaciones."),
+        ("1997–98, Niño húmedo en el norte:", "más lluvia y más días húmedos → más tizón y más lavado → más "
+         "aplicaciones. En el sur, menos horas húmedas y menos lavado → menos aplicaciones."),
+        ("Conclusión:", "el índice del mar no basta para anticipar el tizón; hay que mirar el pronóstico de lluvia "
+         "y humedad en la sierra para la campaña."),
+    ]
+    txt = "\n".join("\n".join(textwrap.wrap(f"{a} {b}", 118, subsequent_indent="    ")) for a, b in takeaway)
+    fig.text(0.07, 0.058, txt, ha="left", va="top", fontsize=10.3, linespacing=1.35,
+             bbox=dict(boxstyle="round,pad=0.7", facecolor=NEUTRAL, edgecolor="none"))
+    note = ("Normal = promedio de las campañas neutras (ICEN −0.7 a 0.5) del mismo punto. Cada región usa su campaña "
+            "del evento con el ICEN más alto. Cifras bajo los mapas: promedio de la zona norte (> −9°) y sur "
+            "(< −15°); líneas discontinuas: −9° y −15°. Fuente: SIMCAST con PISCOt v1.2, PISCOeo_pm/TimesFM y "
+            "PISCOp v3.0; ICEN: ENFEN 2024.")
+    fig.text(0.07, 0.012, "\n".join(textwrap.wrap(note, 175)), fontsize=7, color="#52514e", va="bottom")
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+# ----------------------------------------------------------------------------
 # Runner
 # ----------------------------------------------------------------------------
 
@@ -544,6 +772,8 @@ def run_el_nino_icen(
             for r, c in per.items()} for n, per in event_seasons(x_by_region).items()}
     with open(out_dir / f"icen_summary_{variety}.json", "w") as fh:
         json.dump(summary, fh, indent=2, ensure_ascii=False)
+    plot_event_story(pts, mats, x_by_region, years, grid, results_root, icen, variety_label=variety_label,
+                     out_path=out_dir / f"icen_story_1991_vs_1997_{variety}.png", gadm_peru_gpkg=gadm_peru_gpkg)
     plot_scatter(table, summary,
                  title=f"ICEN medio de cada campaña frente a la anomalía regional, variedad {variety_label}",
                  out_path=out_dir / f"icen_scatter_regions_{variety}.png")

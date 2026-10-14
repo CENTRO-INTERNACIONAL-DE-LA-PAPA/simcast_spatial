@@ -318,6 +318,7 @@ Optional: boundary overlay via GADM (`animation_all_lands.load_gadm_peru`). A UR
 | `icen_slope_maps_<variety>.png` | APP, BU, FU: slope per point against the season-mean ICEN (SD of the variable per +1 ICEN), stippled where local p < 0.05, with the field significance in each panel |
 | `icen_scatter_regions_<variety>.png` | per unit (SIMCAST region × Norte/Centro/Sur) and variable: season ICEN vs. unit anomaly, one dot per season coloured by ICEN category, fitted line, slope, r, p |
 | `icen_event_maps_<variety>.png` | mean of the neutral seasons (ICEN −0.7 to 0.5), then one anomaly map per El Niño event (1982–83, 1986–87, 1991–92, 1997–98, 2015–16); each region shows the event's season with the highest ICEN, blank if that season was not warm |
+| `icen_story_1991_vs_1997_<variety>.png` | infographic: two warm coastal events with opposite effects in the highlands, as a chain rain → humid days (≥ 7 h with RH ≥ 90 %) → BU → FU → APP, same colour scale for both events |
 | `icen_regional_<variety>.csv` | the data behind the scatter plots |
 | `icen_summary_<variety>.json` | regional slopes, r, p and the field-significance results |
 
