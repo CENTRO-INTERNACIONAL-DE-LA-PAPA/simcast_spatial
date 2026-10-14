@@ -755,6 +755,9 @@ def run_el_nino_icen(
     table = pd.DataFrame(rows)
     csv_path = out_dir / f"icen_regional_{variety}.csv"
     table.round(5).to_csv(csv_path, index=False)
+    summary["event_seasons"] = {
+        n: {r: (None if c is None else {"season": season_label(r, c[0]), "icen": round(c[1], 2)})
+            for r, c in per.items()} for n, per in event_seasons(x_by_region).items()}
     with open(out_dir / f"icen_summary_{variety}.json", "w") as fh:
         json.dump(summary, fh, indent=2, ensure_ascii=False)
 
@@ -767,11 +770,6 @@ def run_el_nino_icen(
                     title=f"Promedio de las campañas neutras y anomalía en cada evento El Niño costero, "
                           f"variedad {variety_label}",
                     out_path=out_dir / f"icen_event_maps_{variety}.png", gadm_peru_gpkg=gadm_peru_gpkg)
-    summary["event_seasons"] = {
-        n: {r: (None if c is None else {"season": season_label(r, c[0]), "icen": round(c[1], 2)})
-            for r, c in per.items()} for n, per in event_seasons(x_by_region).items()}
-    with open(out_dir / f"icen_summary_{variety}.json", "w") as fh:
-        json.dump(summary, fh, indent=2, ensure_ascii=False)
     plot_event_story(pts, mats, x_by_region, years, grid, results_root, icen, variety_label=variety_label,
                      out_path=out_dir / f"icen_story_1991_vs_1997_{variety}.png", gadm_peru_gpkg=gadm_peru_gpkg)
     plot_scatter(table, summary,
