@@ -49,3 +49,13 @@ def test_slope_matches_polyfit_and_detects_signal():
 def test_zone_and_category():
     assert zone_of(np.array([-5.0, -9.0, -15.0, -16.0])).tolist() == ["Norte", "Norte", "Centro", "Sur"]
     assert category(-1.0) == "fría" and category(0.0) == "neutra" and category(3.9) == "cálida extraordinaria"
+
+
+def test_event_seasons_pick_warmest_season_per_region():
+    from el_nino_icen import event_seasons
+
+    s = season_icen(load_icen("reference/icen_enfen2024.txt"), range(1981, 2020))
+    ev = event_seasons(s)
+    assert ev["1997–98"]["Sierra Alta"][0] == 1997  # Nov 1997 - Apr 1998, not Nov 1998 - Apr 1999
+    assert ev["1982–83"]["Sierra Media"][0] == 1983  # Apr-Jul 1983 (ICEN ~4), not 1982 (~0.2)
+    assert all(c is None or c[1] > 0.5 for per in ev.values() for c in per.values())

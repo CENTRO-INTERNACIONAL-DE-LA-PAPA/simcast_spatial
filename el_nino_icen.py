@@ -32,6 +32,9 @@ Outputs in ``<results_root>/el_nino_icen/``
   where local p < 0.05, field significance in each panel.
 * ``icen_scatter_regions_<variety>.png`` - per unit and variable, season
   ICEN vs. unit anomaly with the fitted line, slope, r and p.
+* ``icen_event_maps_<variety>.png`` - the mean of the neutral seasons, then
+  one anomaly map per El Niño event; each region shows the season of that
+  event with the highest ICEN (only if it was warm, ICEN > 0.5).
 * ``icen_regional_<variety>.csv`` - the data behind the scatter plots.
 * ``icen_summary_<variety>.json`` - regional slopes and field significance.
 """
@@ -318,6 +321,135 @@ def plot_scatter(table, summary, *, title, out_path):
     plt.close(fig)
 
 
+# El Niño Costero events (ENFEN 2024) with at least one moderate-or-stronger
+# regional season, as groups of SIMCAST years.
+EVENTS = {"1982–83": (1982, 1983), "1986–87": (1986, 1987), "1991–92": (1991, 1992),
+          "1997–98": (1997, 1998), "2015–16": (2015, 2016)}
+
+
+def event_seasons(x_by_region: pd.DataFrame, events=EVENTS, warm: float = 0.5) -> dict:
+    """{event: {region: (year, icen) or None}}: the event's warmest season per region."""
+    out = {}
+    for name, ys in events.items():
+        out[name] = {}
+        for region in SEASON_MONTHS:
+            cand = [(y, float(x_by_region.loc[y, region])) for y in ys if y in x_by_region.index]
+            y, v = max(cand, key=lambda t: t[1])
+            out[name][region] = (y, v) if v > warm else None
+    return out
+
+
+def plot_event_maps(pts, mats, x_by_region, years, grid, *, title, out_path, gadm_peru_gpkg=None):
+    """Rows APP/BU/FU; neutral-season mean, then one anomaly map per event."""
+    import matplotlib.pyplot as plt
+
+    from viz_palette import diverging_classes, sequential_classes
+
+    ev = event_seasons(x_by_region)
+    yi = {y: i for i, y in enumerate(years)}
+    regions = pts["region"].to_numpy()
+    neutral = {r: [yi[y] for y in years if -0.7 <= x_by_region.loc[y, r] < 0.5] for r in SEASON_MONTHS}
+
+    t = grid["transform"]
+    extent = [t.c, t.c + grid["ncols"] * t.a, t.f + grid["nrows"] * t.e, t.f]
+    pos = pd.Index(grid["ids"]).get_indexer(pts["ID"])
+    yy, xx = grid["y_idx"][pos], grid["x_idx"][pos]
+
+    def image(vals):
+        img = np.full((grid["nrows"], grid["ncols"]), np.nan)
+        img[yy, xx] = vals
+        return np.ma.masked_invalid(img)
+
+    adm0 = adm1 = None
+    if gadm_peru_gpkg is not None:
+        try:
+            from animation_all_lands import load_gadm_peru
+
+            adm0, adm1 = load_gadm_peru(gadm_peru_gpkg)
+        except Exception as e:
+            print(f"[el_nino_icen] no GADM: {e}")
+
+    ncol = 1 + len(ev)
+    fig, axes = plt.subplots(3, ncol, figsize=(2.6 * ncol + 1.0, 3 * 3.25 + 2.2), squeeze=False)
+    fig.subplots_adjust(left=0.035, right=0.925, top=0.86, bottom=0.07, wspace=0.04, hspace=0.16)
+    for i, (v, (label, unit, _)) in enumerate(VARIABLES.items()):
+        x = mats[v]
+        ref = np.empty(len(pts))
+        for r, cols in neutral.items():
+            m = regions == r
+            ref[m] = x[m][:, cols].mean(axis=1)
+        anoms = {}
+        for name, per_region in ev.items():
+            a = np.full(len(pts), np.nan)
+            for r, chosen in per_region.items():
+                if chosen is not None:
+                    m = regions == r
+                    a[m] = x[m, yi[chosen[0]]] - ref[m]
+            anoms[name] = a
+        seq = sequential_classes(ref)
+        allan = np.concatenate([a[np.isfinite(a)] for a in anoms.values()])
+        div = diverging_classes(allan, n_per_arm=4)
+        scm, snm = seq.cmap_norm()
+        dcm, dnm = div.cmap_norm()
+        unit_txt = "aplicaciones" if unit == "aplicaciones" else label
+        panels = [("Promedio campañas neutras", ref, None)] + [(n, anoms[n], ev[n]) for n in ev]
+        im_s = im_d = None
+        for j, (name, vals, info) in enumerate(panels):
+            ax = axes[i, j]
+            if info is None:
+                im_s = ax.imshow(image(vals), extent=extent, origin="upper", cmap=scm, norm=snm,
+                                 interpolation="nearest")
+            else:
+                im_d = ax.imshow(image(vals), extent=extent, origin="upper", cmap=dcm, norm=dnm,
+                                 interpolation="nearest")
+            if adm1 is not None:
+                adm1.boundary.plot(ax=ax, edgecolor="0.6", linewidth=0.3)
+                adm0.boundary.plot(ax=ax, edgecolor="black", linewidth=0.6)
+            ax.set_xlim(-81.3, -68.5)
+            ax.set_ylim(-18.5, -3.3)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            if i == 0:
+                if info is None:
+                    sub = (f"Costa/VI: {len(neutral['Costa y Valle Interandino'])} campañas\n"
+                           f"S. Media: {len(neutral['Sierra Media'])} campañas\n"
+                           f"S. Alta: {len(neutral['Sierra Alta'])} campañas")
+                    head = "Promedio campañas neutras"
+                else:
+                    sub = "\n".join(
+                        f"{REGION_SHORT[r]}: " + ("sin Niño" if info[r] is None else
+                                                  f"{season_label(r, info[r][0])} (ICEN {info[r][1]:.1f})")
+                        for r in REGION_ORDER)
+                    head = f"El Niño {name}"
+                ax.set_title(head, fontsize=10.5, fontweight="bold", pad=44)
+                ax.text(0.5, 1.02, sub, transform=ax.transAxes, ha="center", va="bottom", fontsize=7.3,
+                        color="#52514e")
+            if j == 0:
+                ax.set_ylabel(label, fontsize=13, fontweight="bold")
+        # colourbars for the row: neutral mean (left, under the first map) and anomalies (right)
+        b0 = axes[i, 0].get_position()
+        cax = fig.add_axes([b0.x0 + 0.01, b0.y0 - 0.012, b0.width - 0.02, 0.007])
+        seq.colorbar(fig, im_s, cax)
+        cax.tick_params(labelsize=6.5)
+        bl = axes[i, -1].get_position()
+        cax2 = fig.add_axes([bl.x1 + 0.008, bl.y0 + 0.02, 0.008, bl.height - 0.04])
+        cb = fig.colorbar(im_d, cax=cax2, extend="both", spacing="uniform", ticks=div.boundaries)
+        cb.ax.set_yticklabels([f"{b:g}".replace("-", "−") for b in div.boundaries])
+        cb.ax.tick_params(labelsize=7, length=0)
+        cb.outline.set_visible(False)
+        cb.set_label(f"Anomalía ({unit_txt} por campaña)", fontsize=8)
+    import textwrap
+
+    fig.suptitle("\n".join(textwrap.wrap(title, 110)), fontsize=12)
+    fig.text(0.01, 0.004, "Anomalía = campaña del evento − promedio de las campañas neutras (ICEN medio entre −0.7 y 0.5) "
+             "del mismo punto. En cada evento, cada región muestra su campaña con el ICEN más alto; en blanco si "
+             "esa campaña no fue cálida (ICEN ≤ 0.5). Un solo evento por mapa: sin prueba de significancia.",
+             fontsize=7.5)
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=170)
+    plt.close(fig)
+
+
 # ----------------------------------------------------------------------------
 # Runner
 # ----------------------------------------------------------------------------
@@ -403,6 +535,15 @@ def run_el_nino_icen(
                     title=f"Respuesta a El Niño costero durante la campaña, variedad {variety_label}: "
                           f"pendiente de cada variable frente al ICEN medio de su campaña ({years[0]}–{years[-1]})",
                     out_path=out_dir / f"icen_slope_maps_{variety}.png", gadm_peru_gpkg=gadm_peru_gpkg)
+    plot_event_maps(pts, mats, x_by_region, years, grid,
+                    title=f"Promedio de las campañas neutras y anomalía en cada evento El Niño costero, "
+                          f"variedad {variety_label}",
+                    out_path=out_dir / f"icen_event_maps_{variety}.png", gadm_peru_gpkg=gadm_peru_gpkg)
+    summary["event_seasons"] = {
+        n: {r: (None if c is None else {"season": season_label(r, c[0]), "icen": round(c[1], 2)})
+            for r, c in per.items()} for n, per in event_seasons(x_by_region).items()}
+    with open(out_dir / f"icen_summary_{variety}.json", "w") as fh:
+        json.dump(summary, fh, indent=2, ensure_ascii=False)
     plot_scatter(table, summary,
                  title=f"ICEN medio de cada campaña frente a la anomalía regional, variedad {variety_label}",
                  out_path=out_dir / f"icen_scatter_regions_{variety}.png")
