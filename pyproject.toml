@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "astral>=3.2",
-    "dask>=2025.12.0",
+    "dask[distributed]>=2025.12.0",
     "geopandas>=1.1.1",
     "matplotlib>=3.10.8",
     "netcdf4>=1.7.3",
@@ -17,6 +17,16 @@ dependencies = [
     "pytz>=2025.2",
     "rasterio>=1.4.4",
     "rioxarray>=0.20.0",
+    "scipy>=1.14",
     "tqdm>=4.67.1",
     "xarray>=2025.12.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "statsmodels>=0.14",
+]
+
+[ty.tool.environment]
+python=".venv"

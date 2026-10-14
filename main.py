@@ -1,43 +1,68 @@
-def main():
-    """
-    Example "runner" script.
+"""
+Pipeline runner.
 
-    Edit the paths/toggles below to run individual steps.
-    """
+Examples
+--------
+Build inputs (PISCOp v3.0 prec + reused tmax/tmin/td)::
 
-    from config import EXAMPLE_PATHS, ResourcesConfig, SimcastConfig
+    uv run python main.py --steps prepare
 
-    # ------------------------------------------------------------------
-    # 0) EDIT ME: paths + compute settings
-    # ------------------------------------------------------------------
-    paths = EXAMPLE_PATHS
-    resources = ResourcesConfig(
-        resampling_workers=6,
-        masking_workers=6,
-        masking_chunk_size=10_000,
-        simcast_batch_size=300,
-        dask_n_workers=8,
-        dask_threads_per_worker=4,
-        dask_memory_limit="14GB",
+Full rerun for resistant and susceptible varieties::
+
+    uv run python main.py --steps simcast rasters merge trend maps animations --vt r s
+
+Steps run in the order listed in STEP_ORDER, whatever order they are given in.
+Paths live in `config.py` (`EXAMPLE_SOURCES`, `EXAMPLE_PATHS`, `RESULTS_ROOTS`).
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import time
+
+STEP_ORDER = [
+    "prepare",  # build <parquet_base_dir> (prepare_inputs.py)
+    "resampling",  # legacy: prec NetCDF -> 0.01 deg NetCDFs (resampling.py)
+    "masking",  # legacy: NetCDF -> parquet (masking.py)
+    "simcast",  # SIMCAST per season -> simcast_results.parquet + APP tif
+    "rasters",  # BU/FU season-sum GeoTIFFs
+    "merge",  # one GeoTIFF per year and variable (all regions) for ArcGIS
+    "points",  # add lon/lat/altitude to existing simcast_results.parquet files
+    "trend",  # OLS trend stats + yearly table (with lon/lat/altitude)
+    "maps",  # trend significance / coefficient PNGs
+    "animations",  # APP, BU, FU "all lands" GIF + MP4
+    "elnino",  # response to the season-mean ICEN: slope maps + regional scatter
+]
+
+VT_NAMES = {"s": "susceptible", "ms": "moderately susceptible", "mr": "moderately resistant",
+            "r": "resistant", "hr": "highly resistant"}
+
+
+def run(steps, varieties, *, start_year=1981, end_year=2020, animation_vars=("APP", "BU", "FU")):
+    from dataclasses import replace
+
+    from config import (
+        EXAMPLE_PATHS,
+        EXAMPLE_SOURCES,
+        RESULTS_ROOTS,
+        ResourcesConfig,
+        SimcastConfig,
     )
-    sim_cfg = SimcastConfig(vt="r")
+
+    paths = EXAMPLE_PATHS
+    resources = ResourcesConfig()
+    steps = [s for s in STEP_ORDER if s in set(steps)]
 
     # ------------------------------------------------------------------
-    # 1) Toggle steps on/off
+    # Variety-independent steps
     # ------------------------------------------------------------------
-    RUN_RESAMPLING = False
-    RUN_MASKING = False
-    RUN_SIMCAST = False
-    RUN_BU_FU_RASTERS = False
-    RUN_ALL_LANDS_ANIMATION = False
-    RUN_TREND_STATS = False
-    RUN_TREND_SIGNIFICANCE_MAPS = False
-    RUN_TREND_COEFFICIENT_MAPS = False
+    if "prepare" in steps:
+        from prepare_inputs import prepare_all
 
-    # ------------------------------------------------------------------
-    # 2) Resampling (prec only)
-    # ------------------------------------------------------------------
-    if RUN_RESAMPLING:
+        prepare_all(EXAMPLE_SOURCES, workers=resources.prepare_workers)
+
+    if "resampling" in steps:
         from resampling import run_resampling
 
         run_resampling(
@@ -47,10 +72,7 @@ def main():
             max_workers=resources.resampling_workers,
         )
 
-    # ------------------------------------------------------------------
-    # 3) Masking / extraction (NetCDF -> monthly Parquet)
-    # ------------------------------------------------------------------
-    if RUN_MASKING:
+    if "masking" in steps:
         from masking import extract_folder_to_parquets
 
         masking_jobs = [
@@ -60,7 +82,6 @@ def main():
             ("tmin", paths.tmin_nc_dir, "tmin_daily_*.nc", "tmin"),
             ("td", paths.td_nc_dir, "td_daily_*.nc", "td"),
         ]
-
         for variable, netcdf_dir, glob_pattern, nc_var_name in masking_jobs:
             extract_folder_to_parquets(
                 resample_folder=netcdf_dir,
@@ -74,135 +95,151 @@ def main():
             )
 
     # ------------------------------------------------------------------
-    # 4) SIMCAST (Parquet -> results)
+    # Per-variety steps
     # ------------------------------------------------------------------
-    if RUN_SIMCAST:
-        from load_variables import parallel_simcast_pipeline
+    for vt in varieties:
+        sim_cfg = SimcastConfig(vt=vt)
+        results_root = RESULTS_ROOTS[vt]
+        vpaths = replace(paths, results_root=results_root)
+        label = VT_NAMES.get(vt, vt)
+        print(f"\n===== variety {vt!r} ({label}) -> {results_root} =====", flush=True)
+        t0 = time.perf_counter()
 
-        parallel_simcast_pipeline(
-            start_year=1981,
-            end_year=2019,
-            vt=sim_cfg.vt,
-            base_path=paths.parquet_base_dir,
-            potato_grid_file=paths.potato_grid_file,
-            results_root=paths.results_root,
-            n_workers=resources.dask_n_workers,
-            threads_per_worker=resources.dask_threads_per_worker,
-            memory_limit=resources.dask_memory_limit,
-            dashboard_address=resources.dask_dashboard_address,
-            write_tiff=True,
-            show_task_bar=True,
-            batch_size=resources.simcast_batch_size,
-            rh_thresh=sim_cfg.rh_thresh,
-            timezone=sim_cfg.timezone,
-            min_day=sim_cfg.min_day,
-            forced_day=sim_cfg.forced_day,
-        )
+        if "simcast" in steps:
+            from load_variables import parallel_simcast_pipeline
 
-    # ------------------------------------------------------------------
-    # 5) Trend analysis (OLS over years)
-    # ------------------------------------------------------------------
-    stats_parquet_path = paths.results_root / "statistical_trends_all.parquet"
-    yearly_parquet_path = paths.results_root / "yearly_aggregated_data.parquet"
+            parallel_simcast_pipeline(
+                start_year=start_year,
+                end_year=end_year,
+                vt=sim_cfg.vt,
+                base_path=vpaths.parquet_base_dir,
+                potato_grid_file=vpaths.potato_grid_file,
+                results_root=results_root,
+                n_workers=resources.dask_n_workers,
+                threads_per_worker=resources.dask_threads_per_worker,
+                memory_limit=resources.dask_memory_limit,
+                dashboard_address=resources.dask_dashboard_address,
+                write_tiff=True,  # APP raster per season (used by the APP animation)
+                show_task_bar=False,
+                id_chunk_size=resources.simcast_id_chunk_size,
+                skip_existing=True,  # rerun resumes where it stopped
+                max_data_year=end_year,
+                rh_thresh=sim_cfg.rh_thresh,
+                timezone=sim_cfg.timezone,
+                min_day=sim_cfg.min_day,
+                forced_day=sim_cfg.forced_day,
+                sun_method=sim_cfg.sun_method,
+            )
+            print(f"[{vt}] simcast done ({(time.perf_counter() - t0) / 60:.1f} min)", flush=True)
 
-    if RUN_TREND_STATS:
-        from trend_significance import compute_trend_stats
+        if "rasters" in steps:
+            from animation_all_lands import generate_bu_fu_rasters
 
-        compute_trend_stats(
-            results_root=paths.results_root,
-            potato_grid_file=paths.potato_grid_file,
-            output_stats_parquet_path=stats_parquet_path,
-            output_yearly_data_path=yearly_parquet_path,
-            year_range=(1981, 2020),
-            batch_size=500,
-            min_years=10,
-            n_workers=resources.dask_n_workers,
-            threads_per_worker=resources.dask_threads_per_worker,
-            memory_limit=resources.dask_memory_limit,
-        )
-
-    if RUN_TREND_SIGNIFICANCE_MAPS:
-        from trend_significance import create_significance_map
-
-        for var in ["app", "abu", "afu"]:
-            create_significance_map(
-                shapefile_path=paths.potato_grid_file,
-                stats_parquet_path=stats_parquet_path,
-                output_image_path=paths.results_root
-                / f"trend_significance_map_{var}.png",
-                variable_prefix=var,
-                p_threshold=0.05,
-                gadm_peru_gpkg=paths.gadm_peru_gpkg,
+            generate_bu_fu_rasters(
+                results_root=results_root,
+                grid_file_path=vpaths.potato_grid_file,
+                workers=resources.prepare_workers,
+                skip_existing=True,
             )
 
-    if RUN_TREND_COEFFICIENT_MAPS:
-        from trend_significance import create_coefficient_map
+        if "merge" in steps:
+            from merge_rasters import merge_all_years
 
-        for var in ["app", "abu", "afu"]:
-            create_coefficient_map(
-                shapefile_path=paths.potato_grid_file,
-                stats_parquet_path=stats_parquet_path,
-                output_image_path=paths.results_root
-                / f"coefficient_magnitude_map_{var}.png",
-                variable_prefix=var,
-                p_threshold=0.05,
-                gadm_peru_gpkg=paths.gadm_peru_gpkg,
+            merge_all_years(
+                results_root,
+                variety=VT_NAMES.get(vt, vt).replace(" ", "_"),
+                overwrite=True,  # cheap (~10 s); keeps merged files in sync
             )
 
-    # ------------------------------------------------------------------
-    # 6) BU/FU rasters from existing simcast_results.parquet
-    # ------------------------------------------------------------------
-    if RUN_BU_FU_RASTERS:
-        from animation_all_lands import generate_bu_fu_rasters
+        if "points" in steps:
+            from point_attrs import backfill_results
 
-        generate_bu_fu_rasters(
-            results_root=paths.results_root,
-            grid_file_path=paths.potato_grid_file,
-        )
+            backfill_results(results_root, vpaths.potato_grid_file, workers=6)
 
-    # ------------------------------------------------------------------
-    # 7) "All lands" animation (sums BU rasters across cultivos)
-    # ------------------------------------------------------------------
-    if RUN_ALL_LANDS_ANIMATION:
-        from animation_all_lands import (
-            build_all_lands_data,
-            collect_paths_by_year,
-            create_all_lands_animation,
-            load_gadm_peru,
-            save_all_lands_animation,
-        )
+        stats_parquet_path = results_root / "statistical_trends_all.parquet"
+        yearly_parquet_path = results_root / "yearly_aggregated_data.parquet"
 
-        paths_by_year = collect_paths_by_year(
-            results_root=paths.results_root,
-            start_year=1981,
-            end_year=2019,
-            strict=False,  # keep years even if one cultivo is missing
-        )
-        years = sorted(paths_by_year)
+        if "trend" in steps:
+            from trend_significance import compute_trend_stats
 
-        all_data, extent, ref_crs, vmin, vmax, _ = build_all_lands_data(paths_by_year)
+            compute_trend_stats(
+                results_root=results_root,
+                potato_grid_file=vpaths.potato_grid_file,
+                output_stats_parquet_path=stats_parquet_path,
+                output_yearly_data_path=yearly_parquet_path,
+                year_range=(start_year, end_year),  # inclusive
+                min_years=10,
+                aggregate_by="season",  # "calendar_year" = legacy behaviour
+                exclude_truncated=True,  # drop seasons cut short by missing inputs
+                workers=resources.prepare_workers,
+            )
 
-        gadm0, gadm1 = load_gadm_peru(paths.gadm_peru_gpkg)
+        if "maps" in steps:
+            from trend_significance import create_coefficient_map, create_significance_map
 
-        _, _, anim = create_all_lands_animation(
-            all_data=all_data,
-            extent=extent,
-            years=years,
-            gadm_admin0=gadm0,
-            gadm_admin1=gadm1,
-            ref_crs=ref_crs,
-            vmin=vmin,
-            vmax=vmax,
-            interval=400,
-            colorbar_label="Blight Units",
-        )
+            for var in ["app", "abu", "afu"]:
+                create_significance_map(
+                    shapefile_path=vpaths.potato_grid_file,
+                    stats_parquet_path=stats_parquet_path,
+                    output_image_path=results_root / f"trend_significance_map_{var}.png",
+                    variable_prefix=var,
+                    p_threshold=0.05,
+                    gadm_peru_gpkg=vpaths.gadm_peru_gpkg,
+                )
+                create_coefficient_map(
+                    shapefile_path=vpaths.potato_grid_file,
+                    stats_parquet_path=stats_parquet_path,
+                    output_image_path=results_root / f"coefficient_magnitude_map_{var}.png",
+                    variable_prefix=var,
+                    p_threshold=0.05,
+                    gadm_peru_gpkg=vpaths.gadm_peru_gpkg,
+                )
 
-        save_all_lands_animation(
-            anim,
-            gif_path="lateblight_all_lands_bu.gif",
-            mp4_path="lateblight_all_lands_bu.mp4",
-            fps=3,
-        )
+        if "animations" in steps:
+            from animation_all_lands import make_all_lands_animation
+
+            for var in animation_vars:
+                make_all_lands_animation(
+                    results_root=results_root,
+                    variable=var,
+                    start_year=start_year,
+                    end_year=end_year,
+                    gadm_peru_gpkg=vpaths.gadm_peru_gpkg,
+                    title_prefix=f"SIMCAST {var} ({label})",
+                    vmax_percentile=99.0,
+                    fps=3,
+                )
+
+        if "elnino" in steps:
+            from pathlib import Path
+
+            from el_nino_icen import run_el_nino_icen
+
+            run_el_nino_icen(
+                results_root=results_root,
+                potato_grid_file=vpaths.potato_grid_file,
+                icen_file=Path(__file__).parent / "reference" / "icen_enfen2024.txt",
+                variety=label.replace(" ", "_"),
+                variety_label={"resistant": "resistente", "susceptible": "susceptible"}.get(label, label),
+                years=range(start_year, min(end_year, 2019) + 1),  # 2020 lacks Sierra Alta
+                gadm_peru_gpkg=vpaths.gadm_peru_gpkg,
+            )
+
+        print(f"[{vt}] finished in {(time.perf_counter() - t0) / 60:.1f} min", flush=True)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--steps", nargs="+", choices=STEP_ORDER, required=True)
+    ap.add_argument("--vt", nargs="+", default=["r"], choices=list(VT_NAMES),
+                    help="variety resistance classes to run (default: r)")
+    ap.add_argument("--start-year", type=int, default=1981)
+    ap.add_argument("--end-year", type=int, default=2020)
+    ap.add_argument("--animation-vars", nargs="+", default=["APP", "BU", "FU"])
+    a = ap.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    run(a.steps, a.vt, start_year=a.start_year, end_year=a.end_year,
+        animation_vars=tuple(a.animation_vars))
 
 
 if __name__ == "__main__":
